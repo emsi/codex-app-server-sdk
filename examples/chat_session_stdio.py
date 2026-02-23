@@ -23,7 +23,6 @@ from codex_app_server_client import (
     CodexTransportError,
 )
 
-
 DEFAULT_PROMPTS = [
     "I am testing a Python API client for codex app-server.",
     "Give me a short checklist for robust websocket/stdio client design.",
@@ -47,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--cmd",
-        help='Command used to launch app-server, e.g. \'codex app-server --port 0\'.',
+        help="Command used to launch app-server, e.g. 'codex app-server --port 0'.",
     )
     parser.add_argument(
         "--turn-timeout",

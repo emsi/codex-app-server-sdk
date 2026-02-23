@@ -6,12 +6,9 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from .errors import CodexTransportError
+import websockets
 
-try:
-    import websockets
-except Exception:  # pragma: no cover
-    websockets = None
+from .errors import CodexTransportError
 
 
 class Transport(ABC):
@@ -110,7 +107,9 @@ class StdioTransport(Transport):
         try:
             return json.loads(line.decode("utf-8"))
         except json.JSONDecodeError as exc:
-            raise CodexTransportError("received invalid JSON from stdio transport") from exc
+            raise CodexTransportError(
+                "received invalid JSON from stdio transport"
+            ) from exc
 
     async def close(self) -> None:
         """Terminate subprocess and release handles."""
@@ -158,21 +157,19 @@ class WebSocketTransport(Transport):
         """Open websocket if not already connected."""
         if self._socket is not None:
             return
-        if websockets is None:  # pragma: no cover
-            raise CodexTransportError(
-                "websockets dependency is unavailable; install package extras"
-            )
         try:
             self._socket = await asyncio.wait_for(
                 websockets.connect(
                     self._url,
-                    extra_headers=self._headers,
+                    additional_headers=self._headers,
+                    compression=None,
                 ),
                 timeout=self._connect_timeout,
             )
         except Exception as exc:
             raise CodexTransportError(
-                f"failed to connect websocket transport: {self._url}"
+                "failed to connect websocket transport: "
+                f"{self._url} ({exc.__class__.__name__}: {exc})"
             ) from exc
 
     async def send(self, payload: Mapping[str, Any]) -> None:
@@ -191,7 +188,9 @@ class WebSocketTransport(Transport):
         try:
             message = await self._socket.recv()
         except Exception as exc:
-            raise CodexTransportError("failed reading from websocket transport") from exc
+            raise CodexTransportError(
+                "failed reading from websocket transport"
+            ) from exc
 
         if isinstance(message, (bytes, bytearray)):
             text = message.decode("utf-8")

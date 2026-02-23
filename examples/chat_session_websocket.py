@@ -23,7 +23,6 @@ from codex_app_server_client import (
     CodexTransportError,
 )
 
-
 DEFAULT_PROMPTS = [
     "I am connected over websocket. Reply with one sentence.",
     "Now give two practical tips for building resilient JSON-RPC clients.",

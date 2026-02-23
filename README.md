@@ -128,7 +128,7 @@ uv run python examples/chat_session_websocket.py
 ### Data models (`src/codex_app_server_client/models.py`)
 
 - `InitializeResult`: parsed initialize response (`protocol_version`, `server_info`, `capabilities`, `raw`).
-- `ChatResult`: buffered turn output (`thread_id`, `turn_id`, `final_text`, `raw_events`).
+- `ChatResult`: buffered turn output (`thread_id`, `turn_id`, `final_text`, `raw_events`, `assistant_item_id`, `completion_source`).
 
 ### Exceptions (`src/codex_app_server_client/errors.py`)
 
@@ -140,6 +140,9 @@ uv run python examples/chat_session_websocket.py
 ## Behavior notes
 
 - This version does not expose a streaming event API.
-- `chat_once` buffers notifications and returns final assistant text on turn completion.
+- `chat_once` buffers notifications and resolves final assistant text from completed `agentMessage` items (`item/completed`), with a `thread/read(includeTurns=true)` fallback.
+- `chat_once` does not rely on delta-string concatenation heuristics for final output.
 - The client uses modern thread/turn methods (`thread/start`, `thread/resume`, `turn/start`, `turn/interrupt`).
 - `initialize` currently sends `protocolVersion: "1"` as handshake metadata.
+- Websocket transport targets modern `websockets` (`>=16,<17`), uses the `additional_headers` API, and disables compression by default (`compression=None`) for codex app-server compatibility.
+- After dependency changes, run `uv sync` to refresh the virtual environment.

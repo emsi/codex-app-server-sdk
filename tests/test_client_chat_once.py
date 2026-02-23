@@ -72,6 +72,21 @@ class FakeTransport(Transport):
             await self._incoming.put(
                 {
                     "jsonrpc": "2.0",
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "item": {
+                            "id": "msg-1",
+                            "type": "agentMessage",
+                            "text": "Hello world",
+                        },
+                    },
+                }
+            )
+            await self._incoming.put(
+                {
+                    "jsonrpc": "2.0",
                     "method": "turn/completed",
                     "params": {"turnId": "turn-1"},
                 }
@@ -106,6 +121,15 @@ def test_chat_once_collects_full_text() -> None:
             result = await client.chat_once("Hi")
         finally:
             await client.close()
+
+        assert transport.sent[0]["method"] == "initialize"
+        init_params = transport.sent[0].get("params")
+        assert isinstance(init_params, dict)
+        capabilities = init_params.get("capabilities")
+        assert isinstance(capabilities, dict)
+        opt_out = capabilities.get("optOutNotificationMethods")
+        assert isinstance(opt_out, list)
+        assert "codex/event/agent_message_content_delta" in opt_out
 
         assert result.thread_id == "thread-1"
         assert result.turn_id == "turn-1"

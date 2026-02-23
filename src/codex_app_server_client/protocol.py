@@ -9,8 +9,19 @@ JSONRPC_VERSION = "2.0"
 INITIALIZE_METHOD = "initialize"
 THREAD_START_METHOD = "thread/start"
 THREAD_RESUME_METHOD = "thread/resume"
+THREAD_READ_METHOD = "thread/read"
 TURN_START_METHOD = "turn/start"
 TURN_INTERRUPT_METHOD = "turn/interrupt"
+ITEM_COMPLETED_METHOD = "item/completed"
+
+DEFAULT_OPT_OUT_NOTIFICATION_METHODS = (
+    "codex/event/agent_message_content_delta",
+    "codex/event/reasoning_content_delta",
+    "codex/event/item_started",
+    "codex/event/item_completed",
+    "codex/event/task_started",
+    "codex/event/task_complete",
+)
 
 # Notification method aliases that may signal turn completion.
 TURN_COMPLETED_METHODS = frozenset(

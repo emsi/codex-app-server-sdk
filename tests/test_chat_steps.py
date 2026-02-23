@@ -115,7 +115,7 @@ def test_chat_yields_completed_steps_non_delta() -> None:
         client = await CodexClient(
             StepTransport(),
             request_timeout=1.0,
-            turn_timeout=1.0,
+            inactivity_timeout=1.0,
         ).start()
         try:
             seen = []

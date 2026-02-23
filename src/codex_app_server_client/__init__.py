@@ -4,16 +4,26 @@ from .errors import (
     CodexProtocolError,
     CodexTimeoutError,
     CodexTransportError,
+    CodexTurnInactiveError,
 )
-from .models import ChatResult, ConversationStep, InitializeResult
+from .models import (
+    CancelResult,
+    ChatContinuation,
+    ChatResult,
+    ConversationStep,
+    InitializeResult,
+)
 
 __all__ = [
+    "CancelResult",
+    "ChatContinuation",
     "ChatResult",
     "CodexClient",
     "CodexError",
     "CodexProtocolError",
     "CodexTimeoutError",
     "CodexTransportError",
+    "CodexTurnInactiveError",
     "ConversationStep",
     "InitializeResult",
 ]

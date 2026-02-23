@@ -5,10 +5,22 @@ import contextlib
 import os
 import shlex
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from .errors import CodexProtocolError, CodexTimeoutError, CodexTransportError
-from .models import ChatResult, ConversationStep, InitializeResult
+from .errors import (
+    CodexProtocolError,
+    CodexTimeoutError,
+    CodexTransportError,
+    CodexTurnInactiveError,
+)
+from .models import (
+    CancelResult,
+    ChatContinuation,
+    ChatResult,
+    ConversationStep,
+    InitializeResult,
+)
 from .protocol import (
     DEFAULT_OPT_OUT_NOTIFICATION_METHODS,
     INITIALIZE_METHOD,
@@ -28,19 +40,36 @@ from .protocol import (
 from .transport import StdioTransport, Transport, WebSocketTransport
 
 
-class CodexClient:
-    """High-level async client for Codex app-server.
+@dataclass(slots=True)
+class _StepRecord:
+    event_index: int
+    step: ConversationStep
 
-    The client currently exposes a buffered chat API (`chat_once`) that waits
-    for turn completion and returns the final text plus collected raw events.
-    """
+
+@dataclass(slots=True)
+class _TurnSession:
+    thread_id: str
+    turn_id: str
+    raw_events: list[dict[str, Any]] = field(default_factory=list)
+    completed_agent_messages: list[tuple[str | None, str]] = field(default_factory=list)
+    completed_item_ids: set[str] = field(default_factory=set)
+    step_records: list[_StepRecord] = field(default_factory=list)
+    step_item_ids: set[str] = field(default_factory=set)
+    completed: bool = False
+    failed: bool = False
+    failure_message: str | None = None
+    interrupted: bool = False
+
+
+class CodexClient:
+    """High-level async client for Codex app-server."""
 
     def __init__(
         self,
         transport: Transport,
         *,
         request_timeout: float = 30.0,
-        turn_timeout: float = 180.0,
+        inactivity_timeout: float | None = 120.0,
         strict: bool = False,
     ) -> None:
         """Create a client bound to a transport.
@@ -48,18 +77,22 @@ class CodexClient:
         Args:
             transport: Connected or connectable transport instance.
             request_timeout: Default timeout for request/response calls.
-            turn_timeout: Default timeout while waiting for turn completion.
+            inactivity_timeout: Turn inactivity timeout in seconds. If None,
+                turn waits can run indefinitely until terminal events.
             strict: If True, fail on certain protocol ambiguities.
         """
         self._transport = transport
         self._request_timeout = request_timeout
-        self._turn_timeout = turn_timeout
+        self._inactivity_timeout = inactivity_timeout
         self._strict = strict
         self._initialized = False
 
         self._next_request_id = 1
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._notifications: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._deferred_notifications: list[dict[str, Any]] = []
+        self._turn_sessions: dict[str, _TurnSession] = {}
+
         self._send_lock = asyncio.Lock()
         self._receiver_task: asyncio.Task[None] | None = None
         self._closed = False
@@ -73,20 +106,10 @@ class CodexClient:
         env: Mapping[str, str] | None = None,
         connect_timeout: float = 30.0,
         request_timeout: float = 30.0,
-        turn_timeout: float = 180.0,
+        inactivity_timeout: float | None = 120.0,
         strict: bool = False,
     ) -> CodexClient:
-        """Create and connect a client over stdio transport.
-
-        Args:
-            command: Command argv for the app-server process.
-            cwd: Optional process working directory.
-            env: Optional process environment overrides.
-            connect_timeout: Timeout for process startup.
-            request_timeout: Default request timeout.
-            turn_timeout: Default turn completion timeout.
-            strict: Enable strict behavior for ambiguous protocol events.
-        """
+        """Create and connect a client over stdio transport."""
         resolved_command = (
             list(command) if command is not None else _default_stdio_command()
         )
@@ -99,7 +122,7 @@ class CodexClient:
         client = cls(
             transport,
             request_timeout=request_timeout,
-            turn_timeout=turn_timeout,
+            inactivity_timeout=inactivity_timeout,
             strict=strict,
         )
         await client.start()
@@ -114,20 +137,10 @@ class CodexClient:
         headers: Mapping[str, str] | None = None,
         connect_timeout: float = 30.0,
         request_timeout: float = 30.0,
-        turn_timeout: float = 180.0,
+        inactivity_timeout: float | None = 120.0,
         strict: bool = False,
     ) -> CodexClient:
-        """Create and connect a client over websocket transport.
-
-        Args:
-            url: Websocket endpoint URL. Defaults to env or localhost URL.
-            token: Optional bearer token. Defaults to env variable.
-            headers: Additional websocket request headers.
-            connect_timeout: Timeout for websocket connection.
-            request_timeout: Default request timeout.
-            turn_timeout: Default turn completion timeout.
-            strict: Enable strict behavior for ambiguous protocol events.
-        """
+        """Create and connect a client over websocket transport."""
         resolved_url = (
             url or os.getenv("CODEX_APP_SERVER_WS_URL") or "ws://127.0.0.1:8765"
         )
@@ -144,7 +157,7 @@ class CodexClient:
         client = cls(
             transport,
             request_timeout=request_timeout,
-            turn_timeout=turn_timeout,
+            inactivity_timeout=inactivity_timeout,
             strict=strict,
         )
         await client.start()
@@ -181,6 +194,9 @@ class CodexClient:
                 future.set_exception(CodexTransportError("client is closing"))
         self._pending.clear()
 
+        self._turn_sessions.clear()
+        self._deferred_notifications.clear()
+
         await self._transport.close()
 
     async def initialize(
@@ -189,15 +205,7 @@ class CodexClient:
         *,
         timeout: float | None = None,
     ) -> InitializeResult:
-        """Run `initialize` handshake and cache initialization state.
-
-        Args:
-            params: Optional initialize params. Uses default payload if omitted.
-            timeout: Optional timeout override for this request.
-
-        Returns:
-            Parsed initialize result object.
-        """
+        """Run `initialize` handshake and cache initialization state."""
         payload = _prepare_initialize_params(params)
         result = await self.request(INITIALIZE_METHOD, payload, timeout=timeout)
         result_dict = result if isinstance(result, dict) else {"value": result}
@@ -221,18 +229,7 @@ class CodexClient:
         *,
         timeout: float | None = None,
     ) -> Any:
-        """Send a JSON-RPC request and await response result.
-
-        Args:
-            method: JSON-RPC method name.
-            params: Optional request params payload.
-            timeout: Optional timeout override.
-
-        Raises:
-            CodexTransportError: if client is closed or transport fails.
-            CodexTimeoutError: if response does not arrive in time.
-            CodexProtocolError: if server returns JSON-RPC error.
-        """
+        """Send a JSON-RPC request and await response result."""
         if self._closed:
             raise CodexTransportError("client is closed")
 
@@ -272,75 +269,70 @@ class CodexClient:
 
     async def chat_once(
         self,
-        text: str,
+        text: str | None = None,
         thread_id: str | None = None,
         *,
         user: str | None = None,
         metadata: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
+        inactivity_timeout: float | None = None,
+        continuation: ChatContinuation | None = None,
     ) -> ChatResult:
-        """Send one user message and wait for the turn's final assistant output.
+        """Send one user message and wait for final assistant output.
 
-        Args:
-            text: User text prompt.
-            thread_id: Existing thread id to continue. If omitted, a new thread is started.
-            user: Optional user identifier forwarded to server.
-            metadata: Optional metadata map sent with thread/turn requests.
-            timeout: Optional turn-completion timeout override.
-
-        Returns:
-            Buffered chat result containing final text and collected events.
-            Final text is resolved from completed `agentMessage` items, with
-            a `thread/read(includeTurns=true)` fallback when needed.
+        On inactivity timeout this raises `CodexTurnInactiveError` with a
+        continuation token; call `chat_once(continuation=...)` to resume.
         """
-        if not self._initialized:
-            await self.initialize()
-
-        active_thread_id = thread_id
-        if active_thread_id is None:
-            thread_result = await self.request(
-                THREAD_START_METHOD,
-                {"metadata": dict(metadata)} if metadata else {},
-            )
-            active_thread_id = _extract_thread_id(thread_result)
-            if not active_thread_id:
-                raise CodexProtocolError(
-                    "thread/start succeeded but no thread id found"
-                )
+        if continuation is not None:
+            if text is not None:
+                raise ValueError("text must be omitted when continuation is provided")
+            session = self._get_continuation_session(continuation, expected_mode="once")
+            active_thread_id = session.thread_id
         else:
-            try:
-                await self.request(THREAD_RESUME_METHOD, {"threadId": active_thread_id})
-            except CodexProtocolError:
-                if self._strict:
-                    raise
+            if text is None:
+                raise ValueError("text is required when continuation is not provided")
+            active_thread_id, session = await self._start_chat_turn(
+                text=text,
+                thread_id=thread_id,
+                user=user,
+                metadata=metadata,
+            )
 
-        turn_params: dict[str, Any] = {
-            "threadId": active_thread_id,
-            "input": [{"type": "text", "text": text}],
-        }
-        if user:
-            turn_params["user"] = user
-        if metadata:
-            turn_params["metadata"] = dict(metadata)
+        cursor = continuation.cursor if continuation is not None else len(session.raw_events)
+        timeout_value = self._resolve_inactivity_timeout(inactivity_timeout)
 
-        turn_result = await self.request(TURN_START_METHOD, turn_params)
-        turn_id = _extract_turn_id(turn_result)
-        events, completed_agent_messages = await self._collect_turn_events(
-            turn_id=turn_id,
-            timeout=timeout if timeout is not None else self._turn_timeout,
-        )
+        while True:
+            if session.failed:
+                self._cleanup_turn_state(session.turn_id)
+                raise CodexProtocolError(session.failure_message or "turn failed")
+
+            if session.completed:
+                break
+
+            event = await self._await_turn_event_or_timeout(
+                session=session,
+                timeout_value=timeout_value,
+                cursor=cursor,
+                mode="once",
+            )
+
+            if _is_transport_error_event(event):
+                message = _find_first_string_by_exact_keys(event, {"message"})
+                raise CodexTransportError(message or "transport failed")
+
+            self._apply_event_to_session(session, event)
+            cursor = len(session.raw_events)
 
         assistant_item_id: str | None = None
         final_text = ""
         completion_source: Literal["item_completed", "thread_read_fallback"] | None = None
 
-        if completed_agent_messages:
-            assistant_item_id, final_text = completed_agent_messages[-1]
+        if session.completed_agent_messages:
+            assistant_item_id, final_text = session.completed_agent_messages[-1]
             completion_source = "item_completed"
         else:
             fallback_message = await self._read_turn_agent_message(
                 thread_id=active_thread_id,
-                turn_id=turn_id,
+                turn_id=session.turn_id,
             )
             if fallback_message is not None:
                 assistant_item_id, final_text = fallback_message
@@ -348,125 +340,168 @@ class CodexClient:
 
         final_text = final_text.strip()
         if not final_text:
+            self._cleanup_turn_state(session.turn_id)
             raise CodexProtocolError(
                 "turn completed but no final assistant message could be resolved"
             )
 
-        return ChatResult(
+        result = ChatResult(
             thread_id=active_thread_id,
-            turn_id=turn_id or "",
+            turn_id=session.turn_id,
             final_text=final_text,
-            raw_events=events,
+            raw_events=list(session.raw_events),
             assistant_item_id=assistant_item_id,
             completion_source=completion_source,
         )
+        self._cleanup_turn_state(session.turn_id)
+        return result
 
     async def chat(
         self,
-        text: str,
+        text: str | None = None,
         thread_id: str | None = None,
         *,
         user: str | None = None,
         metadata: Mapping[str, Any] | None = None,
-        timeout: float | None = None,
+        inactivity_timeout: float | None = None,
+        continuation: ChatContinuation | None = None,
     ) -> AsyncIterator[ConversationStep]:
-        """Stream completed, non-delta conversation steps for one user message.
+        """Stream completed, non-delta conversation steps for one turn.
 
-        This API yields complete step objects based on `item/completed`
-        notifications and does not concatenate text deltas heuristically.
+        On inactivity timeout this raises `CodexTurnInactiveError` with a
+        continuation token; call `chat(continuation=...)` to resume the same turn.
         """
-        if not self._initialized:
-            await self.initialize()
-
-        active_thread_id = thread_id
-        if active_thread_id is None:
-            thread_result = await self.request(
-                THREAD_START_METHOD,
-                {"metadata": dict(metadata)} if metadata else {},
+        if continuation is not None:
+            if text is not None:
+                raise ValueError("text must be omitted when continuation is provided")
+            session = self._get_continuation_session(
+                continuation,
+                expected_mode="stream",
             )
-            active_thread_id = _extract_thread_id(thread_result)
-            if not active_thread_id:
-                raise CodexProtocolError("thread/start succeeded but no thread id found")
+            cursor = max(0, continuation.cursor)
+            active_thread_id = session.thread_id
         else:
-            try:
-                await self.request(THREAD_RESUME_METHOD, {"threadId": active_thread_id})
-            except CodexProtocolError:
-                if self._strict:
-                    raise
+            if text is None:
+                raise ValueError("text is required when continuation is not provided")
+            active_thread_id, session = await self._start_chat_turn(
+                text=text,
+                thread_id=thread_id,
+                user=user,
+                metadata=metadata,
+            )
+            cursor = len(session.raw_events)
 
-        turn_params: dict[str, Any] = {
-            "threadId": active_thread_id,
-            "input": [{"type": "text", "text": text}],
-        }
-        if user:
-            turn_params["user"] = user
-        if metadata:
-            turn_params["metadata"] = dict(metadata)
+        timeout_value = self._resolve_inactivity_timeout(inactivity_timeout)
 
-        turn_result = await self.request(TURN_START_METHOD, turn_params)
-        turn_id = _extract_turn_id(turn_result)
-
-        loop = asyncio.get_running_loop()
-        timeout_seconds = timeout if timeout is not None else self._turn_timeout
-        deadline = loop.time() + timeout_seconds
-        seen_item_ids: set[str] = set()
+        for record in session.step_records:
+            if record.event_index >= cursor:
+                yield record.step
+        if cursor < len(session.raw_events):
+            cursor = len(session.raw_events)
 
         while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise CodexTimeoutError(
-                    f"turn completion not observed within {timeout_seconds:.1f}s"
-                )
+            if session.failed:
+                self._cleanup_turn_state(session.turn_id)
+                raise CodexProtocolError(session.failure_message or "turn failed")
 
-            event = await asyncio.wait_for(self._notifications.get(), timeout=remaining)
-            method = event.get("method")
-            if not isinstance(method, str):
-                continue
-
-            if method == "__transport_error__":
-                message = (
-                    _find_first_string_by_exact_keys(event, {"message"})
-                    or "transport failed"
-                )
-                raise CodexTransportError(message)
-
-            matches_turn = True
-            if turn_id:
-                matches_turn = _event_mentions_turn_id(event, turn_id)
-            if turn_id and not matches_turn and not is_turn_completed(method):
-                continue
-
-            if is_turn_failed(method):
-                details = _find_first_string_by_exact_keys(event, {"message", "error"})
-                raise CodexProtocolError(details or "turn failed")
-
-            step = _extract_completed_step(method, event)
-            if step is not None:
-                if step.thread_id != active_thread_id:
-                    pass
-                elif turn_id and step.turn_id != turn_id:
-                    pass
-                else:
-                    if step.item_id is None or step.item_id not in seen_item_ids:
-                        if step.item_id is not None:
-                            seen_item_ids.add(step.item_id)
-                        yield step
-
-            if is_turn_completed(method):
-                if turn_id and not matches_turn and self._strict:
-                    continue
-                if turn_id is not None:
-                    for fallback_step in await self._read_turn_steps(
-                        thread_id=active_thread_id,
-                        turn_id=turn_id,
-                    ):
-                        if fallback_step.item_id is None:
-                            continue
-                        if fallback_step.item_id in seen_item_ids:
-                            continue
-                        seen_item_ids.add(fallback_step.item_id)
-                        yield fallback_step
+            if session.completed:
+                for fallback_step in await self._read_turn_steps(
+                    thread_id=active_thread_id,
+                    turn_id=session.turn_id,
+                ):
+                    if fallback_step.item_id is None:
+                        continue
+                    if fallback_step.item_id in session.step_item_ids:
+                        continue
+                    session.step_item_ids.add(fallback_step.item_id)
+                    yield fallback_step
+                self._cleanup_turn_state(session.turn_id)
                 return
+
+            event = await self._await_turn_event_or_timeout(
+                session=session,
+                timeout_value=timeout_value,
+                cursor=cursor,
+                mode="stream",
+            )
+
+            if _is_transport_error_event(event):
+                message = _find_first_string_by_exact_keys(event, {"message"})
+                raise CodexTransportError(message or "transport failed")
+
+            step_count_before = len(session.step_records)
+            self._apply_event_to_session(session, event)
+            cursor = len(session.raw_events)
+
+            for record in session.step_records[step_count_before:]:
+                yield record.step
+
+    async def cancel(
+        self,
+        continuation: ChatContinuation,
+        *,
+        timeout: float | None = None,
+    ) -> CancelResult:
+        """Interrupt a running turn and return unread data for that continuation."""
+        wait_timeout = timeout if timeout is not None else self._request_timeout
+        turn_id = continuation.turn_id
+        thread_id = continuation.thread_id
+        cursor = max(0, continuation.cursor)
+
+        session = self._turn_sessions.get(turn_id)
+
+        if session is None:
+            was_interrupted = False
+            with contextlib.suppress(
+                CodexProtocolError,
+                CodexTimeoutError,
+                CodexTransportError,
+            ):
+                await self.interrupt_turn(turn_id, timeout=timeout)
+                was_interrupted = True
+            self._drop_deferred_for_turn(turn_id)
+            return CancelResult(
+                thread_id=thread_id,
+                turn_id=turn_id,
+                was_interrupted=was_interrupted,
+            )
+
+        if session.thread_id != thread_id:
+            raise CodexProtocolError(
+                "continuation thread_id does not match active turn session"
+            )
+
+        was_interrupted = False
+        if not session.completed and not session.failed:
+            with contextlib.suppress(
+                CodexProtocolError,
+                CodexTimeoutError,
+                CodexTransportError,
+            ):
+                await self.interrupt_turn(turn_id, timeout=timeout)
+                was_interrupted = True
+                session.interrupted = True
+
+            await self._pump_turn_session(session, max_wait=wait_timeout)
+
+        unread_events = list(session.raw_events[cursor:])
+        unread_steps = [
+            record.step
+            for record in session.step_records
+            if record.event_index >= cursor
+        ]
+
+        result = CancelResult(
+            thread_id=session.thread_id,
+            turn_id=session.turn_id,
+            steps=unread_steps,
+            raw_events=unread_events,
+            was_completed=session.completed,
+            was_interrupted=was_interrupted,
+        )
+
+        self._cleanup_turn_state(turn_id)
+        return result
 
     async def interrupt_turn(
         self, turn_id: str, *, timeout: float | None = None
@@ -484,7 +519,7 @@ class CodexClient:
         thread_id: str,
         turn_id: str | None,
     ) -> tuple[str | None, str] | None:
-        """Read thread state and return final assistant message for a turn when available."""
+        """Read thread state and return final assistant message for a turn."""
         steps = await self._read_turn_steps(thread_id=thread_id, turn_id=turn_id)
         final_message: tuple[str | None, str] | None = None
         for step in steps:
@@ -554,6 +589,270 @@ class CodexClient:
 
         return steps
 
+    async def _start_chat_turn(
+        self,
+        *,
+        text: str,
+        thread_id: str | None,
+        user: str | None,
+        metadata: Mapping[str, Any] | None,
+    ) -> tuple[str, _TurnSession]:
+        if not self._initialized:
+            await self.initialize()
+
+        active_thread_id = thread_id
+        if active_thread_id is None:
+            thread_result = await self.request(
+                THREAD_START_METHOD,
+                {"metadata": dict(metadata)} if metadata else {},
+            )
+            active_thread_id = _extract_thread_id(thread_result)
+            if not active_thread_id:
+                raise CodexProtocolError(
+                    "thread/start succeeded but no thread id found"
+                )
+        else:
+            try:
+                await self.request(THREAD_RESUME_METHOD, {"threadId": active_thread_id})
+            except CodexProtocolError:
+                if self._strict:
+                    raise
+
+        turn_params: dict[str, Any] = {
+            "threadId": active_thread_id,
+            "input": [{"type": "text", "text": text}],
+        }
+        if user:
+            turn_params["user"] = user
+        if metadata:
+            turn_params["metadata"] = dict(metadata)
+
+        turn_result = await self.request(TURN_START_METHOD, turn_params)
+        turn_id = _extract_turn_id(turn_result)
+        if not turn_id:
+            raise CodexProtocolError("turn/start succeeded but no turn id found")
+
+        session = _TurnSession(thread_id=active_thread_id, turn_id=turn_id)
+        self._turn_sessions[turn_id] = session
+        return active_thread_id, session
+
+    def _get_continuation_session(
+        self,
+        continuation: ChatContinuation,
+        *,
+        expected_mode: Literal["once", "stream"],
+    ) -> _TurnSession:
+        if continuation.mode != expected_mode:
+            raise CodexProtocolError(
+                f"continuation mode mismatch: expected {expected_mode!r}, got {continuation.mode!r}"
+            )
+
+        session = self._turn_sessions.get(continuation.turn_id)
+        if session is None:
+            raise CodexProtocolError(
+                "continuation is no longer available in this client instance"
+            )
+
+        if session.thread_id != continuation.thread_id:
+            raise CodexProtocolError(
+                "continuation thread_id does not match active turn session"
+            )
+
+        return session
+
+    async def _pump_turn_session(
+        self,
+        session: _TurnSession,
+        *,
+        max_wait: float | None,
+    ) -> None:
+        if session.completed or session.failed:
+            return
+
+        loop = asyncio.get_running_loop()
+        deadline = None if max_wait is None else (loop.time() + max_wait)
+
+        while not session.completed and not session.failed:
+            timeout_value: float | None = None
+            if deadline is not None:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return
+                timeout_value = remaining
+
+            try:
+                event = await self._receive_turn_event(
+                    session.turn_id,
+                    inactivity_timeout=timeout_value,
+                )
+            except asyncio.TimeoutError:
+                return
+
+            if _is_transport_error_event(event):
+                return
+
+            self._apply_event_to_session(session, event)
+
+    async def _receive_turn_event(
+        self,
+        turn_id: str,
+        *,
+        inactivity_timeout: float | None,
+    ) -> dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        deadline = None
+        if inactivity_timeout is not None:
+            deadline = loop.time() + inactivity_timeout
+
+        while True:
+            deferred_idx = self._find_deferred_for_turn(turn_id)
+            if deferred_idx is not None:
+                return self._deferred_notifications.pop(deferred_idx)
+
+            wait_timeout: float | None = None
+            if deadline is not None:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                wait_timeout = remaining
+
+            if wait_timeout is None:
+                event = await self._notifications.get()
+            else:
+                event = await asyncio.wait_for(
+                    self._notifications.get(),
+                    timeout=wait_timeout,
+                )
+
+            if _is_transport_error_event(event) or self._event_is_for_turn(event, turn_id):
+                return event
+
+            self._deferred_notifications.append(event)
+
+    async def _await_turn_event_or_timeout(
+        self,
+        *,
+        session: _TurnSession,
+        timeout_value: float | None,
+        cursor: int,
+        mode: Literal["once", "stream"],
+    ) -> dict[str, Any]:
+        if timeout_value is None:
+            return await self._receive_turn_event(
+                session.turn_id,
+                inactivity_timeout=None,
+            )
+
+        try:
+            return await self._receive_turn_event(
+                session.turn_id,
+                inactivity_timeout=timeout_value,
+            )
+        except asyncio.TimeoutError as exc:
+            raise CodexTurnInactiveError(
+                f"turn became inactive for {timeout_value:.1f}s",
+                continuation=self._make_continuation(
+                    session,
+                    cursor=cursor,
+                    mode=mode,
+                ),
+                idle_seconds=timeout_value,
+            ) from exc
+
+    def _find_deferred_for_turn(self, turn_id: str) -> int | None:
+        for idx, event in enumerate(self._deferred_notifications):
+            if _is_transport_error_event(event) or self._event_is_for_turn(event, turn_id):
+                return idx
+        return None
+
+    def _event_is_for_turn(self, event: dict[str, Any], turn_id: str) -> bool:
+        if _event_mentions_turn_id(event, turn_id):
+            return True
+
+        method = event.get("method")
+        if not isinstance(method, str):
+            return False
+
+        if not (is_turn_completed(method) or is_turn_failed(method)):
+            return False
+
+        params = event.get("params")
+        if not isinstance(params, Mapping):
+            return True
+
+        has_direct_turn = (
+            _find_first_string_by_exact_keys(params, {"turnid", "turn_id"})
+            is not None
+        )
+        turn_obj = _find_first_dict_by_exact_key(params, {"turn"})
+        has_turn_obj = False
+        if turn_obj is not None:
+            has_turn_obj = (
+                _find_first_string_by_exact_keys(turn_obj, {"id"}) is not None
+            )
+
+        return not has_direct_turn and not has_turn_obj
+
+    def _apply_event_to_session(self, session: _TurnSession, event: dict[str, Any]) -> None:
+        method = event.get("method")
+        if not isinstance(method, str):
+            return
+
+        session.raw_events.append(event)
+        event_index = len(session.raw_events) - 1
+
+        completed_message = _extract_completed_agent_message(method, event)
+        if completed_message is not None:
+            item_id, _ = completed_message
+            if item_id is None or item_id not in session.completed_item_ids:
+                if item_id is not None:
+                    session.completed_item_ids.add(item_id)
+                session.completed_agent_messages.append(completed_message)
+
+        step = _extract_completed_step(method, event)
+        if step is not None:
+            if step.item_id is None or step.item_id not in session.step_item_ids:
+                if step.item_id is not None:
+                    session.step_item_ids.add(step.item_id)
+                session.step_records.append(_StepRecord(event_index=event_index, step=step))
+
+        if is_turn_failed(method):
+            details = _find_first_string_by_exact_keys(event, {"message", "error"})
+            session.failed = True
+            session.failure_message = details or "turn failed"
+
+        if is_turn_completed(method):
+            session.completed = True
+
+    def _cleanup_turn_state(self, turn_id: str) -> None:
+        self._turn_sessions.pop(turn_id, None)
+        self._drop_deferred_for_turn(turn_id)
+
+    def _drop_deferred_for_turn(self, turn_id: str) -> None:
+        retained: list[dict[str, Any]] = []
+        for event in self._deferred_notifications:
+            if self._event_is_for_turn(event, turn_id):
+                continue
+            retained.append(event)
+        self._deferred_notifications = retained
+
+    def _resolve_inactivity_timeout(self, timeout: float | None) -> float | None:
+        return timeout if timeout is not None else self._inactivity_timeout
+
+    def _make_continuation(
+        self,
+        session: _TurnSession,
+        *,
+        cursor: int,
+        mode: Literal["once", "stream"],
+    ) -> ChatContinuation:
+        return ChatContinuation(
+            thread_id=session.thread_id,
+            turn_id=session.turn_id,
+            cursor=max(0, cursor),
+            mode=mode,
+        )
+
     def _start_receiver(self) -> None:
         """Start background receive loop exactly once."""
         if self._receiver_task is not None:
@@ -607,65 +906,6 @@ class CodexClient:
                     "params": {"message": str(exc)},
                 }
             )
-
-    async def _collect_turn_events(
-        self,
-        *,
-        turn_id: str | None,
-        timeout: float,
-    ) -> tuple[list[dict[str, Any]], list[tuple[str | None, str]]]:
-        """Collect notifications until turn completion (or failure/timeout)."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        raw_events: list[dict[str, Any]] = []
-        completed_agent_messages: list[tuple[str | None, str]] = []
-        completed_item_ids: set[str] = set()
-
-        while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise CodexTimeoutError(
-                    f"turn completion not observed within {timeout:.1f}s"
-                )
-
-            event = await asyncio.wait_for(self._notifications.get(), timeout=remaining)
-            method = event.get("method")
-            if not isinstance(method, str):
-                continue
-
-            if method == "__transport_error__":
-                message = (
-                    _find_first_string_by_exact_keys(event, {"message"})
-                    or "transport failed"
-                )
-                raise CodexTransportError(message)
-
-            matches_turn = True
-            if turn_id:
-                matches_turn = _event_mentions_turn_id(event, turn_id)
-            if turn_id and not matches_turn and not is_turn_completed(method):
-                continue
-
-            raw_events.append(event)
-
-            if is_turn_failed(method):
-                details = _find_first_string_by_exact_keys(event, {"message", "error"})
-                raise CodexProtocolError(details or "turn failed")
-
-            completed_message = _extract_completed_agent_message(method, event)
-            if completed_message is not None:
-                item_id, _ = completed_message
-                if item_id is not None and item_id in completed_item_ids:
-                    pass
-                else:
-                    if item_id is not None:
-                        completed_item_ids.add(item_id)
-                    completed_agent_messages.append(completed_message)
-
-            if is_turn_completed(method):
-                if turn_id and not matches_turn and self._strict:
-                    continue
-                return raw_events, completed_agent_messages
 
 
 def _default_stdio_command() -> list[str]:
@@ -749,24 +989,193 @@ def _extract_turn_id(payload: Any) -> str | None:
     return None
 
 
+def _extract_completed_agent_message(
+    method: str,
+    payload: dict[str, Any],
+) -> tuple[str | None, str] | None:
+    """Extract final assistant text from an `item/completed` event."""
+    if method != ITEM_COMPLETED_METHOD:
+        return None
+
+    params = payload.get("params")
+    if not isinstance(params, Mapping):
+        return None
+
+    item = params.get("item")
+    if not isinstance(item, Mapping):
+        return None
+
+    item_type = item.get("type")
+    if item_type != "agentMessage":
+        return None
+
+    item_id = item.get("id") if isinstance(item.get("id"), str) else None
+    text = _extract_item_text(item)
+    if text is None:
+        return None
+    return item_id, text
+
+
+def _extract_completed_step(
+    method: str,
+    payload: dict[str, Any],
+) -> ConversationStep | None:
+    """Build a completed conversation step from an `item/completed` event."""
+    if method != ITEM_COMPLETED_METHOD:
+        return None
+
+    params = payload.get("params")
+    if not isinstance(params, Mapping):
+        return None
+
+    item = params.get("item")
+    if not isinstance(item, Mapping):
+        return None
+
+    thread_id = _find_first_string_by_exact_keys(params, {"threadid", "thread_id"})
+    if thread_id is None:
+        thread_obj = _find_first_dict_by_exact_key(params, {"thread"})
+        if thread_obj is not None:
+            thread_id = _find_first_string_by_exact_keys(thread_obj, {"id"})
+
+    turn_id = _find_first_string_by_exact_keys(params, {"turnid", "turn_id"})
+    if turn_id is None:
+        turn_obj = _find_first_dict_by_exact_key(params, {"turn"})
+        if turn_obj is not None:
+            turn_id = _find_first_string_by_exact_keys(turn_obj, {"id"})
+
+    if not thread_id or not turn_id:
+        return None
+
+    return _step_from_item(
+        thread_id=thread_id,
+        turn_id=turn_id,
+        item=dict(item),
+        data={"params": dict(params), "item": dict(item)},
+    )
+
+
+def _step_from_item(
+    *,
+    thread_id: str,
+    turn_id: str,
+    item: Mapping[str, Any],
+    data: Mapping[str, Any] | None = None,
+) -> ConversationStep | None:
+    """Map raw item payload to a normalized `ConversationStep`."""
+    item_type_obj = item.get("type")
+    if not isinstance(item_type_obj, str):
+        return None
+
+    step_type_map = {
+        "reasoning": "thinking",
+        "commandExecution": "exec",
+        "agentMessage": "codex",
+        "mcpToolCall": "tool",
+        "fileChange": "file",
+    }
+    step_type = step_type_map.get(item_type_obj, item_type_obj)
+
+    text = _extract_item_text(item)
+
+    item_id_obj = item.get("id")
+    item_id = item_id_obj if isinstance(item_id_obj, str) else None
+
+    payload_data: dict[str, Any] = {}
+    if data is not None:
+        payload_data.update(dict(data))
+    payload_data.setdefault("item", dict(item))
+
+    return ConversationStep(
+        thread_id=thread_id,
+        turn_id=turn_id,
+        item_id=item_id,
+        step_type=step_type,
+        item_type=item_type_obj,
+        text=text,
+        data=payload_data,
+    )
+
+
+def _extract_item_text(item: Mapping[str, Any]) -> str | None:
+    """Best-effort text extraction from a completed item payload."""
+    item_type = item.get("type")
+
+    if item_type == "agentMessage":
+        text = item.get("text")
+        if isinstance(text, str):
+            return text
+        content = item.get("content")
+        if isinstance(content, str):
+            return content
+
+    if item_type == "reasoning":
+        parts: list[str] = []
+        summary = item.get("summary")
+        if isinstance(summary, list):
+            parts.extend(str(v) for v in summary if isinstance(v, str))
+        content = item.get("content")
+        if isinstance(content, list):
+            parts.extend(str(v) for v in content if isinstance(v, str))
+        if parts:
+            return "\n".join(parts)
+
+    if item_type == "commandExecution":
+        command = item.get("command")
+        if isinstance(command, str) and command:
+            return command
+
+    for key in ("text", "message", "content", "summary"):
+        value = item.get(key)
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts = [v for v in value if isinstance(v, str)]
+            if parts:
+                return "\n".join(parts)
+
+    return None
+
+
+def _event_mentions_turn_id(payload: Any, turn_id: str) -> bool:
+    """Return True when payload references target turn id."""
+    if not isinstance(payload, (dict, list)):
+        return False
+
+    direct = _find_first_string_by_exact_keys(payload, {"turnid", "turn_id"})
+    if direct == turn_id:
+        return True
+
+    turn_obj = _find_first_dict_by_exact_key(payload, {"turn"})
+    if turn_obj:
+        nested_id = _find_first_string_by_exact_keys(turn_obj, {"id"})
+        if nested_id == turn_id:
+            return True
+
+    return False
+
+
 def _find_first_string_by_exact_keys(
     payload: Any,
     keys_lower: set[str],
 ) -> str | None:
     """Depth-first search for first string whose key matches provided names."""
-    if isinstance(payload, dict):
+    if isinstance(payload, Mapping):
         for key, value in payload.items():
             if key.lower() in keys_lower and isinstance(value, str):
                 return value
         for value in payload.values():
             found = _find_first_string_by_exact_keys(value, keys_lower)
-            if found:
+            if found is not None:
                 return found
-    elif isinstance(payload, list):
+        return None
+
+    if isinstance(payload, list):
         for item in payload:
             found = _find_first_string_by_exact_keys(item, keys_lower)
-            if found:
+            if found is not None:
                 return found
+
     return None
 
 
@@ -774,185 +1183,26 @@ def _find_first_dict_by_exact_key(
     payload: Any,
     keys_lower: set[str],
 ) -> dict[str, Any] | None:
-    """Depth-first search for first dict whose key matches provided names."""
-    if isinstance(payload, dict):
+    """Depth-first search for first dict value under matching key name."""
+    if isinstance(payload, Mapping):
         for key, value in payload.items():
-            if key.lower() in keys_lower and isinstance(value, dict):
-                return value
+            if key.lower() in keys_lower and isinstance(value, Mapping):
+                return dict(value)
         for value in payload.values():
             found = _find_first_dict_by_exact_key(value, keys_lower)
-            if found:
+            if found is not None:
                 return found
-    elif isinstance(payload, list):
+        return None
+
+    if isinstance(payload, list):
         for item in payload:
             found = _find_first_dict_by_exact_key(item, keys_lower)
-            if found:
+            if found is not None:
                 return found
-    return None
-
-
-def _event_mentions_turn_id(event: dict[str, Any], turn_id: str) -> bool:
-    """Return True if event params appear to reference the target turn id."""
-    return _payload_mentions_turn_id(event.get("params"), turn_id)
-
-
-def _payload_mentions_turn_id(payload: Any, turn_id: str) -> bool:
-    """Recursive helper that checks whether payload contains target turn id."""
-    if isinstance(payload, dict):
-        for key, value in payload.items():
-            key_lower = key.lower()
-            if "turn" in key_lower and isinstance(value, str) and value == turn_id:
-                return True
-            if _payload_mentions_turn_id(value, turn_id):
-                return True
-    elif isinstance(payload, list):
-        for item in payload:
-            if _payload_mentions_turn_id(item, turn_id):
-                return True
-    return False
-
-
-def _extract_completed_agent_message(
-    method: str,
-    event: dict[str, Any],
-) -> tuple[str | None, str] | None:
-    """Extract completed assistant message text from notification payload."""
-    if method == ITEM_COMPLETED_METHOD:
-        params = event.get("params")
-        if not isinstance(params, dict):
-            return None
-        item = params.get("item")
-    elif method == "codex/event/item_completed":
-        params = event.get("params")
-        if not isinstance(params, dict):
-            return None
-        msg = params.get("msg")
-        if not isinstance(msg, dict):
-            return None
-        item = msg.get("item")
-    else:
-        return None
-
-    if not isinstance(item, dict):
-        return None
-    if item.get("type") != "agentMessage":
-        return None
-
-    text = item.get("text")
-    if not isinstance(text, str):
-        return None
-
-    item_id = item.get("id")
-    return (item_id if isinstance(item_id, str) else None, text)
-
-
-def _extract_completed_step(
-    method: str,
-    event: dict[str, Any],
-) -> ConversationStep | None:
-    """Extract one completed step from modern or compat item-completed notifications."""
-    if method == ITEM_COMPLETED_METHOD:
-        params = event.get("params")
-        if not isinstance(params, dict):
-            return None
-        thread_id = params.get("threadId")
-        turn_id = params.get("turnId")
-        item = params.get("item")
-    elif method == "codex/event/item_completed":
-        params = event.get("params")
-        if not isinstance(params, dict):
-            return None
-        msg = params.get("msg")
-        if not isinstance(msg, dict):
-            return None
-        thread_id = msg.get("thread_id")
-        turn_id = msg.get("turn_id")
-        item = msg.get("item")
-    else:
-        return None
-
-    if not isinstance(thread_id, str) or not isinstance(turn_id, str):
-        return None
-    if not isinstance(item, dict):
-        return None
-
-    return _step_from_item(thread_id=thread_id, turn_id=turn_id, item=item)
-
-
-def _step_from_item(
-    *,
-    thread_id: str,
-    turn_id: str,
-    item: dict[str, Any],
-) -> ConversationStep | None:
-    """Convert a completed thread item into a canonical conversation step."""
-    item_type = item.get("type")
-    if not isinstance(item_type, str):
-        return None
-    item_id = item.get("id")
-    item_id_value = item_id if isinstance(item_id, str) else None
-
-    step_type = _map_step_type(item_type)
-    text = _extract_step_text(item_type, item)
-    return ConversationStep(
-        thread_id=thread_id,
-        turn_id=turn_id,
-        item_id=item_id_value,
-        step_type=step_type,
-        item_type=item_type,
-        status="completed",
-        text=text,
-        data={"item": item},
-    )
-
-
-def _map_step_type(item_type: str) -> str:
-    """Map protocol item type to user-facing step category."""
-    mapping = {
-        "reasoning": "thinking",
-        "commandExecution": "exec",
-        "agentMessage": "codex",
-        "mcpToolCall": "tool",
-        "fileChange": "file",
-        "webSearch": "web",
-        "plan": "plan",
-        "userMessage": "user",
-    }
-    return mapping.get(item_type, item_type)
-
-
-def _extract_step_text(item_type: str, item: dict[str, Any]) -> str | None:
-    """Extract readable step text from a completed item payload."""
-    if item_type in {"agentMessage", "plan"}:
-        text = item.get("text")
-        return text if isinstance(text, str) else None
-
-    if item_type == "reasoning":
-        parts: list[str] = []
-        summary = item.get("summary")
-        if isinstance(summary, list):
-            parts.extend(part for part in summary if isinstance(part, str))
-        content = item.get("content")
-        if isinstance(content, list):
-            parts.extend(part for part in content if isinstance(part, str))
-        return "\n".join(parts) if parts else None
-
-    if item_type == "commandExecution":
-        command = item.get("command")
-        if isinstance(command, str):
-            return command
-        return None
-
-    if item_type == "webSearch":
-        query = item.get("query")
-        if isinstance(query, str):
-            return query
-        return None
-
-    if item_type == "mcpToolCall":
-        tool = item.get("tool")
-        if isinstance(tool, str):
-            return tool
-        return None
 
     return None
+
+
+def _is_transport_error_event(payload: dict[str, Any]) -> bool:
+    method = payload.get("method")
+    return isinstance(method, str) and method == "__transport_error__"

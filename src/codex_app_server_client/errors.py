@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .models import ChatContinuation
 
 
 class CodexError(Exception):
@@ -12,7 +15,22 @@ class CodexTransportError(CodexError):
 
 
 class CodexTimeoutError(CodexError):
-    """Raised when a request or turn completion exceeds its timeout."""
+    """Raised when a request or turn wait exceeds its timeout policy."""
+
+
+class CodexTurnInactiveError(CodexTimeoutError):
+    """Raised when a running turn emits no matching events for too long."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        continuation: ChatContinuation,
+        idle_seconds: float,
+    ) -> None:
+        super().__init__(message)
+        self.continuation = continuation
+        self.idle_seconds = idle_seconds
 
 
 class CodexProtocolError(CodexError):

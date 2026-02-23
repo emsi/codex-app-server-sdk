@@ -5,8 +5,8 @@ This example demonstrates:
 - websocket URL/token configuration
 - explicit initialize handshake
 - multi-turn chat in one thread
+- inactivity timeout with continuation resume
 - per-turn metadata and user fields
-- robust exception handling and clean shutdown
 """
 
 from __future__ import annotations
@@ -17,10 +17,13 @@ import os
 import sys
 
 from codex_app_server_client import (
+    ChatContinuation,
     CodexClient,
     CodexProtocolError,
+    ChatResult,
     CodexTimeoutError,
     CodexTransportError,
+    CodexTurnInactiveError,
 )
 
 DEFAULT_PROMPTS = [
@@ -55,21 +58,66 @@ def parse_args() -> argparse.Namespace:
         help="Optional user id forwarded in turn payload.",
     )
     parser.add_argument(
-        "--turn-timeout",
+        "--inactivity-timeout",
         type=float,
-        default=180.0,
-        help="Timeout in seconds for each chat turn.",
+        default=120.0,
+        help="Per-turn inactivity timeout in seconds (<=0 disables inactivity timeout).",
     )
     return parser.parse_args()
+
+
+def _normalize_timeout(timeout: float) -> float | None:
+    if timeout <= 0:
+        return None
+    return timeout
+
+
+async def _chat_once_with_resume(
+    client: CodexClient,
+    *,
+    prompt: str,
+    thread_id: str | None,
+    user: str,
+    metadata: dict[str, object],
+    inactivity_timeout: float | None,
+) -> tuple[str, ChatResult]:
+    continuation: ChatContinuation | None = None
+
+    while True:
+        try:
+            if continuation is None:
+                result = await client.chat_once(
+                    prompt,
+                    thread_id=thread_id,
+                    user=user,
+                    metadata=metadata,
+                    inactivity_timeout=inactivity_timeout,
+                )
+            else:
+                result = await client.chat_once(
+                    continuation=continuation,
+                    inactivity_timeout=inactivity_timeout,
+                )
+            return result.thread_id, result
+        except CodexTurnInactiveError as exc:
+            continuation = exc.continuation
+            print(
+                "[warn]"
+                f" turn inactive for {exc.idle_seconds:.1f}s"
+                f" (thread_id={continuation.thread_id} turn_id={continuation.turn_id}); resuming...",
+                file=sys.stderr,
+            )
 
 
 async def run_session(args: argparse.Namespace) -> int:
     """Run multi-turn websocket chat session and print structured output."""
     prompts = args.prompts or DEFAULT_PROMPTS
+    inactivity_timeout = _normalize_timeout(args.inactivity_timeout)
+
     client = await CodexClient.connect_websocket(
         url=args.url,
         token=args.token,
-        turn_timeout=args.turn_timeout,
+        inactivity_timeout=inactivity_timeout,
     )
 
     thread_id: str | None = None
@@ -80,8 +128,9 @@ async def run_session(args: argparse.Namespace) -> int:
 
         for index, prompt in enumerate(prompts, start=1):
             print(f"\n[user:{index}] {prompt}")
-            result = await client.chat_once(
-                prompt,
+            thread_id, result_obj = await _chat_once_with_resume(
+                client,
+                prompt=prompt,
                 thread_id=thread_id,
                 user=args.user,
                 metadata={
@@ -89,8 +138,9 @@ async def run_session(args: argparse.Namespace) -> int:
                     "turn_index": index,
                     "client": "codex-app-server-client",
                 },
+                inactivity_timeout=inactivity_timeout,
             )
-            thread_id = result.thread_id
+            result = result_obj
             print(f"[assistant:{index}] {result.final_text}")
             print(
                 "[meta]"

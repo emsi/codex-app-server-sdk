@@ -63,3 +63,39 @@ class ConversationStep(BaseModel):
     status: Literal["completed"] = "completed"
     text: str | None = None
     data: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatContinuation(BaseModel):
+    """Opaque continuation token for resuming a timed-out running turn.
+
+    Attributes:
+        thread_id: Thread that owns the running turn.
+        turn_id: Running turn identifier.
+        cursor: Number of turn events already consumed by caller.
+        mode: API mode that produced this continuation.
+    """
+
+    thread_id: str
+    turn_id: str
+    cursor: int = 0
+    mode: Literal["once", "stream"]
+
+
+class CancelResult(BaseModel):
+    """Result of cancelling a running turn continuation.
+
+    Attributes:
+        thread_id: Thread id for the cancelled turn.
+        turn_id: Turn id that was cancelled.
+        steps: Unread completed step objects accumulated since continuation cursor.
+        raw_events: Unread raw events accumulated since continuation cursor.
+        was_completed: True if the turn was already completed when cancelling.
+        was_interrupted: True if an interrupt request was sent.
+    """
+
+    thread_id: str
+    turn_id: str
+    steps: list[ConversationStep] = Field(default_factory=list)
+    raw_events: list[dict[str, Any]] = Field(default_factory=list)
+    was_completed: bool = False
+    was_interrupted: bool = False

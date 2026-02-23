@@ -1,13 +1,14 @@
 # codex-app-server-client
 
-Async Python client library for Codex app-server using either `stdio` or `websocket` transport.
+Async Python client library for Codex app-server over `stdio` or `websocket` transport.
 
 Current:
 - JSON-RPC request/response handling
 - `initialize`
-- basic thread + turn chat flow
-- completed-step streaming API via `chat(...)` (non-delta)
 - high-level non-streaming `chat_once(...)`
+- step-streaming `chat(...)` (non-delta)
+- inactivity-timeout continuations for both `chat_once` and `chat`
+- cancellation with unread-data drain via `cancel(...)`
 
 ## Install
 
@@ -66,14 +67,43 @@ Websocket defaults:
 - URL: `CODEX_APP_SERVER_WS_URL` or `ws://127.0.0.1:8765`
 - Bearer token: `CODEX_APP_SERVER_TOKEN` (optional)
 
+## Continuation on inactivity timeout
+
+Both high-level APIs support resuming the same running turn.
+
+```python
+import asyncio
+from codex_app_server_client import CodexClient, CodexTurnInactiveError
+
+
+async def main() -> None:
+    client = await CodexClient.connect_stdio(inactivity_timeout=120.0)
+    try:
+        continuation = None
+        while True:
+            try:
+                if continuation is None:
+                    result = await client.chat_once("Do a longer task")
+                else:
+                    result = await client.chat_once(continuation=continuation)
+                print(result.final_text)
+                break
+            except CodexTurnInactiveError as exc:
+                continuation = exc.continuation
+    finally:
+        await client.close()
+
+
+asyncio.run(main())
+```
+
 ## Example clients
 
-More complete examples are included under `examples/`.
+More complete examples are under `examples/`.
 
 ### Rich step-stream example (thinking/exec/codex blocks)
 
-This is the recommended example for understanding the new step-oriented API.
-It uses `client.chat(...)` and prints each completed step in a separate block.
+Recommended example for step-oriented API and continuation behavior.
 
 Stdio:
 
@@ -93,6 +123,12 @@ With extra payload summaries:
 uv run python examples/chat_steps_rich.py --show-data
 ```
 
+Cancel timed-out turns instead of auto-resume:
+
+```bash
+uv run python examples/chat_steps_rich.py --cancel-on-timeout
+```
+
 Common options:
 - `--transport {stdio,websocket}`
 - `--cmd "codex app-server"` (stdio mode)
@@ -100,8 +136,9 @@ Common options:
 - `--token "$CODEX_APP_SERVER_TOKEN"` (websocket mode)
 - `--prompt "..."`
 - `--user "..."`
-- `--turn-timeout 180`
+- `--inactivity-timeout 120`
 - `--show-data`
+- `--cancel-on-timeout`
 
 ### Stdio example (multi-turn, one thread)
 
@@ -149,17 +186,11 @@ uv run python examples/chat_session_websocket.py
 - `start()`: connect transport and start receive loop.
 - `initialize(params=None, timeout=None)`: perform JSON-RPC initialize handshake.
 - `request(method, params=None, timeout=None)`: low-level JSON-RPC request helper.
-- `chat(text, thread_id=None, user=None, metadata=None, timeout=None)`: async iterator that yields completed non-delta conversation steps (`thinking`, `exec`, `codex`, etc.) from item completion notifications.
-- `chat_once(text, thread_id=None, user=None, metadata=None, timeout=None)`: send one user message and wait for completed turn.
-- `interrupt_turn(turn_id, timeout=None)`: send turn interruption request.
+- `chat(text=None, thread_id=None, user=None, metadata=None, inactivity_timeout=None, continuation=None)`: async iterator yielding completed non-delta step blocks.
+- `chat_once(text=None, thread_id=None, user=None, metadata=None, inactivity_timeout=None, continuation=None)`: send one user message and wait for completed turn.
+- `cancel(continuation, timeout=None)`: interrupt running turn, return unread steps/events, and clean turn state.
+- `interrupt_turn(turn_id, timeout=None)`: low-level turn interruption request.
 - `close()`: cancel receive loop and close transport.
-
-Example:
-
-```python
-async for step in client.chat("Summarize staged changes and draft a commit message"):
-    print(step.step_type, step.text)
-```
 
 ### `Transport` and implementations (`src/codex_app_server_client/transport.py`)
 
@@ -172,21 +203,26 @@ async for step in client.chat("Summarize staged changes and draft a commit messa
 - `InitializeResult`: parsed initialize response (`protocol_version`, `server_info`, `capabilities`, `raw`).
 - `ConversationStep`: completed step from `chat(...)` (`step_type`, `item_type`, `text`, `item_id`, `thread_id`, `turn_id`, `data`).
 - `ChatResult`: buffered turn output (`thread_id`, `turn_id`, `final_text`, `raw_events`, `assistant_item_id`, `completion_source`).
+- `ChatContinuation`: continuation token for timed-out running turns (`thread_id`, `turn_id`, `cursor`, `mode`).
+- `CancelResult`: cancellation result with unread `steps`/`raw_events` plus terminal flags.
 
 ### Exceptions (`src/codex_app_server_client/errors.py`)
 
 - `CodexError`: base exception.
 - `CodexTransportError`: transport/connectivity problems.
-- `CodexTimeoutError`: request or turn timeout.
-- `CodexProtocolError`: protocol/JSON-RPC error (includes optional `code` and `data`).
+- `CodexTimeoutError`: request timeout (and base for timeout-related flow).
+- `CodexTurnInactiveError`: per-turn inactivity timeout with resumable `continuation`.
+- `CodexProtocolError`: protocol/JSON-RPC error (optional `code` and `data`).
 
 ## Behavior notes
 
 - This version does not expose token-delta streaming as a public API.
 - `chat(...)` provides async streaming of completed step blocks (non-delta).
-- `chat_once` buffers notifications and resolves final assistant text from completed `agentMessage` items (`item/completed`), with a `thread/read(includeTurns=true)` fallback.
-- `chat_once` does not rely on delta-string concatenation heuristics for final output.
+- `chat_once(...)` resolves final text from completed `agentMessage` items (`item/completed`), with `thread/read(includeTurns=true)` fallback.
+- `turn_timeout` is intentionally removed to avoid conflicting timeout semantics.
+- Turn waits are controlled by `inactivity_timeout` (or unbounded when `None`).
+- `cancel(...)` interrupts a continuation turn, returns unread buffered data, and cleans internal session state so the same thread can be reused safely.
 - The client uses modern thread/turn methods (`thread/start`, `thread/resume`, `turn/start`, `turn/interrupt`).
 - `initialize` currently sends `protocolVersion: "1"` as handshake metadata.
-- Websocket transport targets modern `websockets` (`>=16,<17`), uses the `additional_headers` API, and disables compression by default (`compression=None`) for codex app-server compatibility.
+- Websocket transport targets `websockets` (`>=16,<17`), uses `additional_headers`, and disables compression by default (`compression=None`) for codex app-server compatibility.
 - After dependency changes, run `uv sync` to refresh the virtual environment.

@@ -58,20 +58,6 @@ class FakeTransport(Transport):
             await self._incoming.put(
                 {
                     "jsonrpc": "2.0",
-                    "method": "item/agentMessage/delta",
-                    "params": {"turnId": "turn-1", "delta": "Hello "},
-                }
-            )
-            await self._incoming.put(
-                {
-                    "jsonrpc": "2.0",
-                    "method": "item/agentMessage/delta",
-                    "params": {"turnId": "turn-1", "delta": "world"},
-                }
-            )
-            await self._incoming.put(
-                {
-                    "jsonrpc": "2.0",
                     "method": "item/completed",
                     "params": {
                         "threadId": "thread-1",
@@ -114,7 +100,7 @@ def test_chat_once_collects_full_text() -> None:
         client = await CodexClient(
             transport,
             request_timeout=1.0,
-            turn_timeout=1.0,
+            inactivity_timeout=1.0,
         ).start()
 
         try:

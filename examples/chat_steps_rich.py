@@ -4,6 +4,8 @@
 This example demonstrates:
 - async step streaming via `client.chat(...)`
 - non-delta completed step handling
+- continuation resume on inactivity timeout
+- optional turn cancellation with unread-step drain
 - readable step blocks (`thinking`, `exec`, `codex`, etc.)
 - both stdio and websocket transports
 """
@@ -18,10 +20,12 @@ import shlex
 import sys
 
 from codex_app_server_client import (
+    ChatContinuation,
     CodexClient,
     CodexProtocolError,
     CodexTimeoutError,
     CodexTransportError,
+    CodexTurnInactiveError,
     ConversationStep,
 )
 
@@ -67,10 +71,15 @@ def parse_args() -> argparse.Namespace:
         help="Optional user id forwarded in turn payload.",
     )
     parser.add_argument(
-        "--turn-timeout",
+        "--inactivity-timeout",
         type=float,
-        default=180.0,
-        help="Timeout in seconds for each chat turn.",
+        default=120.0,
+        help="Per-turn inactivity timeout in seconds (<=0 disables inactivity timeout).",
+    )
+    parser.add_argument(
+        "--cancel-on-timeout",
+        action="store_true",
+        help="Cancel timed-out turns instead of auto-resuming them.",
     )
     parser.add_argument(
         "--show-data",
@@ -80,19 +89,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _normalize_timeout(timeout: float) -> float | None:
+    if timeout <= 0:
+        return None
+    return timeout
+
+
 async def _connect_client(args: argparse.Namespace) -> CodexClient:
     """Create and connect a client for the selected transport."""
+    inactivity_timeout = _normalize_timeout(args.inactivity_timeout)
     if args.transport == "stdio":
         command = shlex.split(args.cmd) if args.cmd else None
         return await CodexClient.connect_stdio(
             command=command,
-            turn_timeout=args.turn_timeout,
+            inactivity_timeout=inactivity_timeout,
         )
 
     return await CodexClient.connect_websocket(
         url=args.url,
         token=args.token,
-        turn_timeout=args.turn_timeout,
+        inactivity_timeout=inactivity_timeout,
     )
 
 
@@ -158,6 +174,7 @@ def _print_step(step: ConversationStep, *, show_data: bool) -> None:
 async def run_session(args: argparse.Namespace) -> int:
     """Run multi-turn step-streaming chat and print rich blocks."""
     prompts = args.prompts or DEFAULT_PROMPTS
+    inactivity_timeout = _normalize_timeout(args.inactivity_timeout)
     client = await _connect_client(args)
     thread_id: str | None = None
 
@@ -175,19 +192,60 @@ async def run_session(args: argparse.Namespace) -> int:
         for index, prompt in enumerate(prompts, start=1):
             print(f"\n[user:{index}] {prompt}")
             step_count = 0
-            async for step in client.chat(
-                prompt,
-                thread_id=thread_id,
-                user=args.user,
-                metadata={
-                    "example": "steps-rich",
-                    "turn_index": index,
-                    "transport": args.transport,
-                },
-            ):
-                step_count += 1
-                thread_id = step.thread_id
-                _print_step(step, show_data=args.show_data)
+            continuation: ChatContinuation | None = None
+
+            while True:
+                try:
+                    if continuation is None:
+                        stream = client.chat(
+                            prompt,
+                            thread_id=thread_id,
+                            user=args.user,
+                            metadata={
+                                "example": "steps-rich",
+                                "turn_index": index,
+                                "transport": args.transport,
+                            },
+                            inactivity_timeout=inactivity_timeout,
+                        )
+                    else:
+                        stream = client.chat(
+                            continuation=continuation,
+                            inactivity_timeout=inactivity_timeout,
+                        )
+
+                    async for step in stream:
+                        step_count += 1
+                        thread_id = step.thread_id
+                        _print_step(step, show_data=args.show_data)
+                    break
+                except CodexTurnInactiveError as exc:
+                    continuation = exc.continuation
+                    print(
+                        "[warn]"
+                        f" turn inactive for {exc.idle_seconds:.1f}s"
+                        f" (thread_id={continuation.thread_id} turn_id={continuation.turn_id})",
+                        file=sys.stderr,
+                    )
+
+                    if not args.cancel_on_timeout:
+                        print("[warn] resuming same turn...", file=sys.stderr)
+                        continue
+
+                    cancel_result = await client.cancel(continuation)
+                    for unread_step in cancel_result.steps:
+                        step_count += 1
+                        thread_id = unread_step.thread_id
+                        _print_step(unread_step, show_data=args.show_data)
+                    print(
+                        "[meta]"
+                        f" cancelled turn_id={cancel_result.turn_id}"
+                        f" unread_steps={len(cancel_result.steps)}"
+                        f" unread_events={len(cancel_result.raw_events)}",
+                        file=sys.stderr,
+                    )
+                    break
+
             print(f"[meta] thread_id={thread_id or '-'} steps={step_count}")
 
         return 0

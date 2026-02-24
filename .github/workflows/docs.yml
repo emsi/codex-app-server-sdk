@@ -41,7 +41,7 @@ jobs:
             --accept 200,429
             --max-retries 2
             --retry-wait-time 2
-            --exclude emsi.github.io/codex-app-server-client
+            --exclude emsi.github.io/codex-app-server-sdk
             ./README.md
             ./docs/**/*.md
 

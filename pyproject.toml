@@ -31,8 +31,8 @@ dependencies = [
 ]
 
 [project.urls]
-Documentation = "https://emsi.github.io/codex-app-server-client/"
-Repository = "https://github.com/emsi/codex-app-server-client"
+Documentation = "https://emsi.github.io/codex-app-server-sdk/"
+Repository = "https://github.com/emsi/codex-app-server-sdk"
 
 [build-system]
 requires = ["hatchling"]

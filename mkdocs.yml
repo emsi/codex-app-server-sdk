@@ -1,6 +1,6 @@
 site_name: codex-app-server-sdk
 site_description: Async Python client for codex app-server over stdio and websocket.
-site_url: https://emsi.github.io/codex-app-server-client/
+site_url: https://emsi.github.io/codex-app-server-sdk/
 docs_dir: docs
 theme:
   name: material

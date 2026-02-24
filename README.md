@@ -4,7 +4,7 @@ High-level async Python client for `codex app-server`.
 
 It gives you a convenient conversation API over `stdio` or `websocket` without having to manage raw protocol events yourself.
 
-Documentation: https://emsi.github.io/codex-app-server-client/
+Documentation: https://emsi.github.io/codex-app-server-sdk/
 
 ## Highlights
 
@@ -38,7 +38,7 @@ uv pip install codex-app-server-sdk
 
 ## Documentation
 
-- Docs site: https://emsi.github.io/codex-app-server-client/
+- Docs site: https://emsi.github.io/codex-app-server-sdk/
 - PyPI: https://pypi.org/project/codex-app-server-sdk/
 
 ## Quick start

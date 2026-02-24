@@ -129,7 +129,7 @@ async def run_session(args: argparse.Namespace) -> int:
                     metadata={
                         "example": "stdio",
                         "turn_index": index,
-                        "client": "codex-app-server-client",
+                        "client": "codex-app-server-sdk",
                     },
                     inactivity_timeout=inactivity_timeout,
                 )

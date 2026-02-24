@@ -10,7 +10,7 @@ Edit `pyproject.toml`:
 
 ## 2. Build artifacts
 
-From `codex-app-server-client/`:
+From `codex-app-server-sdk/
 
 ```bash
 uv sync --group dev
@@ -37,7 +37,7 @@ uv run twine upload --repository testpypi dist/*
 Install test build:
 
 ```bash
-pip install -i https://test.pypi.org/simple/ codex-app-server-client
+pip install -i https://test.pypi.org/simple/ codex-app-server-sdk
 ```
 
 ## 5. Publish to PyPI

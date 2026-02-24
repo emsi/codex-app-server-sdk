@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, Field
 
@@ -112,9 +112,30 @@ class UnsetType:
 
 
 UNSET = UnsetType()
-ApprovalPolicy = Literal["untrusted", "on-failure", "on-request", "never"]
-ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
-ReasoningSummary = Literal["auto", "concise", "detailed", "none"]
+
+#: Approval policy accepted by thread/turn configuration fields.
+#:
+#: Values:
+#: - ``"untrusted"``: require approvals for untrusted actions.
+#: - ``"on-failure"``: request approval when an action fails.
+#: - ``"on-request"``: request approval only when model asks for it.
+#: - ``"never"``: never request approval.
+ApprovalPolicy: TypeAlias = Literal["untrusted", "on-failure", "on-request", "never"]
+
+#: Reasoning effort level for per-turn/model behavior.
+#:
+#: Values are ordered from lowest to highest: ``none``, ``minimal``, ``low``,
+#: ``medium``, ``high``, ``xhigh``.
+ReasoningEffort: TypeAlias = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+
+#: Reasoning summary verbosity preference.
+#:
+#: Values:
+#: - ``"auto"``: server/model-selected default
+#: - ``"concise"``: short summary
+#: - ``"detailed"``: expanded summary
+#: - ``"none"``: disable reasoning summary text
+ReasoningSummary: TypeAlias = Literal["auto", "concise", "detailed", "none"]
 
 
 @dataclass(slots=True)
@@ -123,6 +144,19 @@ class ThreadConfig:
 
     Use `UNSET` (default) to omit a field from the request payload.
     Use `None` to explicitly send JSON `null` where the protocol accepts it.
+
+    Attributes:
+        cwd: Thread working directory.
+        base_instructions: Base instruction text for the thread.
+        developer_instructions: Developer instruction text for the thread.
+        model: Model id for thread-level default model selection.
+        model_provider: Optional model provider name/identifier.
+        approval_policy: Approval policy mode (`untrusted`, `on-failure`,
+            `on-request`, `never`).
+        sandbox: Sandbox mode/policy selector accepted by the server.
+        personality: Optional personality profile name.
+        ephemeral: Optional ephemeral-thread flag.
+        config: Optional thread-level config map forwarded to the server.
     """
 
     cwd: str | None | UnsetType = UNSET
@@ -143,6 +177,17 @@ class TurnOverrides:
 
     Use `UNSET` (default) to omit a field from the request payload.
     Use `None` to explicitly send JSON `null` where the protocol accepts it.
+
+    Attributes:
+        cwd: Per-turn working directory override.
+        model: Per-turn model override.
+        effort: Reasoning effort level (`none`..`xhigh`).
+        summary: Reasoning summary verbosity (`auto`, `concise`, `detailed`,
+            `none`).
+        sandbox_policy: Per-turn sandbox policy payload.
+        personality: Per-turn personality override.
+        approval_policy: Per-turn approval policy override.
+        output_schema: Optional structured-output schema override.
     """
 
     cwd: str | None | UnsetType = UNSET

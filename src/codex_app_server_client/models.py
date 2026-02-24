@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -99,3 +100,55 @@ class CancelResult(BaseModel):
     raw_events: list[dict[str, Any]] = Field(default_factory=list)
     was_completed: bool = False
     was_interrupted: bool = False
+
+
+class UnsetType:
+    """Sentinel type representing an omitted configuration field."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+UNSET = UnsetType()
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+ReasoningSummary = Literal["auto", "concise", "detailed", "none"]
+
+
+@dataclass(slots=True)
+class ThreadConfig:
+    """Thread-level configuration overrides used by thread start/resume/fork calls.
+
+    Use `UNSET` (default) to omit a field from the request payload.
+    Use `None` to explicitly send JSON `null` where the protocol accepts it.
+    """
+
+    cwd: str | None | UnsetType = UNSET
+    base_instructions: str | None | UnsetType = UNSET
+    developer_instructions: str | None | UnsetType = UNSET
+    model: str | None | UnsetType = UNSET
+    model_provider: str | None | UnsetType = UNSET
+    approval_policy: str | None | UnsetType = UNSET
+    sandbox: str | None | UnsetType = UNSET
+    personality: str | None | UnsetType = UNSET
+    ephemeral: bool | None | UnsetType = UNSET
+    config: dict[str, Any] | None | UnsetType = UNSET
+
+
+@dataclass(slots=True)
+class TurnOverrides:
+    """Per-turn override fields forwarded to `turn/start`.
+
+    Use `UNSET` (default) to omit a field from the request payload.
+    Use `None` to explicitly send JSON `null` where the protocol accepts it.
+    """
+
+    cwd: str | None | UnsetType = UNSET
+    model: str | None | UnsetType = UNSET
+    effort: ReasoningEffort | None | UnsetType = UNSET
+    summary: ReasoningSummary | None | UnsetType = UNSET
+    sandbox_policy: dict[str, Any] | None | UnsetType = UNSET
+    personality: str | None | UnsetType = UNSET
+    approval_policy: str | None | UnsetType = UNSET
+    output_schema: dict[str, Any] | None | UnsetType = UNSET

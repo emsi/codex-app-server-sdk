@@ -20,11 +20,15 @@ from .models import (
     ChatResult,
     ConversationStep,
     InitializeResult,
+    ThreadConfig,
+    TurnOverrides,
+    UnsetType,
 )
 from .protocol import (
     DEFAULT_OPT_OUT_NOTIFICATION_METHODS,
     INITIALIZE_METHOD,
     ITEM_COMPLETED_METHOD,
+    THREAD_FORK_METHOD,
     THREAD_READ_METHOD,
     THREAD_RESUME_METHOD,
     THREAD_START_METHOD,
@@ -59,6 +63,91 @@ class _TurnSession:
     failed: bool = False
     failure_message: str | None = None
     interrupted: bool = False
+
+
+class ThreadHandle:
+    """Thread-scoped high-level API wrapper bound to one `thread_id`."""
+
+    def __init__(
+        self,
+        client: CodexClient,
+        thread_id: str,
+        *,
+        defaults: ThreadConfig | None = None,
+    ) -> None:
+        self._client = client
+        self._thread_id = thread_id
+        self._defaults = defaults if defaults is not None else ThreadConfig()
+
+    @property
+    def thread_id(self) -> str:
+        """Thread id for this handle."""
+        return self._thread_id
+
+    @property
+    def defaults(self) -> ThreadConfig:
+        """Current local default configuration snapshot for this thread handle."""
+        return self._defaults
+
+    async def chat_once(
+        self,
+        text: str | None = None,
+        *,
+        user: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        inactivity_timeout: float | None = None,
+        continuation: ChatContinuation | None = None,
+        turn_overrides: TurnOverrides | None = None,
+    ) -> ChatResult:
+        """Send one message on this thread and return final assistant output."""
+        return await self._client.chat_once(
+            text,
+            thread_id=self._thread_id,
+            user=user,
+            metadata=metadata,
+            inactivity_timeout=inactivity_timeout,
+            continuation=continuation,
+            turn_overrides=turn_overrides,
+        )
+
+    async def chat(
+        self,
+        text: str | None = None,
+        *,
+        user: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        inactivity_timeout: float | None = None,
+        continuation: ChatContinuation | None = None,
+        turn_overrides: TurnOverrides | None = None,
+    ) -> AsyncIterator[ConversationStep]:
+        """Stream completed, non-delta steps for one message on this thread."""
+        async for step in self._client.chat(
+            text,
+            thread_id=self._thread_id,
+            user=user,
+            metadata=metadata,
+            inactivity_timeout=inactivity_timeout,
+            continuation=continuation,
+            turn_overrides=turn_overrides,
+        ):
+            yield step
+
+    async def fork(self, *, overrides: ThreadConfig | None = None) -> ThreadHandle:
+        """Fork this thread into a new thread handle."""
+        merged = _merge_thread_config(self._defaults, overrides)
+        return await self._client.fork_thread(self._thread_id, overrides=merged)
+
+    async def update_defaults(self, overrides: ThreadConfig) -> None:
+        """Apply thread-level overrides and update local defaults snapshot."""
+        await self._client.set_thread_defaults(self._thread_id, overrides)
+        self._defaults = _merge_thread_config(self._defaults, overrides)
+
+    async def read(self, *, include_turns: bool = True) -> Any:
+        """Read server-side thread state."""
+        return await self._client.request(
+            THREAD_READ_METHOD,
+            {"threadId": self._thread_id, "includeTurns": include_turns},
+        )
 
 
 class CodexClient:
@@ -277,6 +366,68 @@ class CodexClient:
             )
         return response.get("result")
 
+    async def start_thread(self, config: ThreadConfig | None = None) -> ThreadHandle:
+        """Create a new thread with optional thread-level configuration."""
+        if not self._initialized:
+            await self.initialize()
+
+        params = _thread_config_to_params(config)
+        result = await self.request(THREAD_START_METHOD, params)
+        thread_id = _extract_thread_id(result)
+        if not thread_id:
+            raise CodexProtocolError("thread/start succeeded but no thread id found")
+        return ThreadHandle(self, thread_id, defaults=config if config is not None else ThreadConfig())
+
+    async def resume_thread(
+        self,
+        thread_id: str,
+        *,
+        overrides: ThreadConfig | None = None,
+    ) -> ThreadHandle:
+        """Resume an existing thread and optionally apply thread-level overrides."""
+        if not self._initialized:
+            await self.initialize()
+
+        params: dict[str, Any] = {"threadId": thread_id}
+        params.update(_thread_config_to_params(overrides))
+        result = await self.request(THREAD_RESUME_METHOD, params)
+        resolved_thread_id = _extract_thread_id(result) or thread_id
+        return ThreadHandle(
+            self,
+            resolved_thread_id,
+            defaults=overrides if overrides is not None else ThreadConfig(),
+        )
+
+    async def fork_thread(
+        self,
+        thread_id: str,
+        *,
+        overrides: ThreadConfig | None = None,
+    ) -> ThreadHandle:
+        """Fork an existing thread into a new thread with optional overrides."""
+        if not self._initialized:
+            await self.initialize()
+
+        params: dict[str, Any] = {"threadId": thread_id}
+        params.update(_thread_config_to_params(overrides))
+        result = await self.request(THREAD_FORK_METHOD, params)
+        forked_thread_id = _extract_thread_id(result)
+        if not forked_thread_id:
+            raise CodexProtocolError("thread/fork succeeded but no forked thread id found")
+        return ThreadHandle(
+            self,
+            forked_thread_id,
+            defaults=overrides if overrides is not None else ThreadConfig(),
+        )
+
+    async def set_thread_defaults(self, thread_id: str, overrides: ThreadConfig) -> None:
+        """Apply thread-level overrides to an existing thread."""
+        if not self._initialized:
+            await self.initialize()
+        params: dict[str, Any] = {"threadId": thread_id}
+        params.update(_thread_config_to_params(overrides))
+        await self.request(THREAD_RESUME_METHOD, params)
+
     async def chat_once(
         self,
         text: str | None = None,
@@ -284,6 +435,8 @@ class CodexClient:
         *,
         user: str | None = None,
         metadata: Mapping[str, Any] | None = None,
+        thread_config: ThreadConfig | None = None,
+        turn_overrides: TurnOverrides | None = None,
         inactivity_timeout: float | None = None,
         continuation: ChatContinuation | None = None,
     ) -> ChatResult:
@@ -295,6 +448,10 @@ class CodexClient:
         if continuation is not None:
             if text is not None:
                 raise ValueError("text must be omitted when continuation is provided")
+            if thread_config is not None:
+                raise ValueError("thread_config cannot be used with continuation")
+            if turn_overrides is not None:
+                raise ValueError("turn_overrides cannot be used with continuation")
             session = self._get_continuation_session(continuation, expected_mode="once")
             active_thread_id = session.thread_id
         else:
@@ -305,6 +462,8 @@ class CodexClient:
                 thread_id=thread_id,
                 user=user,
                 metadata=metadata,
+                thread_config=thread_config,
+                turn_overrides=turn_overrides,
             )
 
         cursor = continuation.cursor if continuation is not None else len(session.raw_events)
@@ -373,6 +532,8 @@ class CodexClient:
         *,
         user: str | None = None,
         metadata: Mapping[str, Any] | None = None,
+        thread_config: ThreadConfig | None = None,
+        turn_overrides: TurnOverrides | None = None,
         inactivity_timeout: float | None = None,
         continuation: ChatContinuation | None = None,
     ) -> AsyncIterator[ConversationStep]:
@@ -384,6 +545,10 @@ class CodexClient:
         if continuation is not None:
             if text is not None:
                 raise ValueError("text must be omitted when continuation is provided")
+            if thread_config is not None:
+                raise ValueError("thread_config cannot be used with continuation")
+            if turn_overrides is not None:
+                raise ValueError("turn_overrides cannot be used with continuation")
             session = self._get_continuation_session(
                 continuation,
                 expected_mode="stream",
@@ -398,6 +563,8 @@ class CodexClient:
                 thread_id=thread_id,
                 user=user,
                 metadata=metadata,
+                thread_config=thread_config,
+                turn_overrides=turn_overrides,
             )
             cursor = len(session.raw_events)
 
@@ -600,25 +767,17 @@ class CodexClient:
         thread_id: str | None,
         user: str | None,
         metadata: Mapping[str, Any] | None,
+        thread_config: ThreadConfig | None,
+        turn_overrides: TurnOverrides | None,
     ) -> tuple[str, _TurnSession]:
         if not self._initialized:
             await self.initialize()
 
-        active_thread_id = thread_id
-        if active_thread_id is None:
-            thread_result = await self.request(
-                THREAD_START_METHOD,
-                {"metadata": dict(metadata)} if metadata else {},
-            )
-            active_thread_id = _extract_thread_id(thread_result)
-            if not active_thread_id:
-                raise CodexProtocolError("thread/start succeeded but no thread id found")
-        else:
-            try:
-                await self.request(THREAD_RESUME_METHOD, {"threadId": active_thread_id})
-            except CodexProtocolError:
-                if self._strict:
-                    raise
+        active_thread_id = await self._prepare_thread_context(
+            thread_id=thread_id,
+            metadata=metadata,
+            thread_config=thread_config,
+        )
 
         turn_params: dict[str, Any] = {
             "threadId": active_thread_id,
@@ -628,6 +787,7 @@ class CodexClient:
             turn_params["user"] = user
         if metadata:
             turn_params["metadata"] = dict(metadata)
+        turn_params.update(_turn_overrides_to_params(turn_overrides))
 
         turn_result = await self.request(TURN_START_METHOD, turn_params)
         turn_id = _extract_turn_id(turn_result)
@@ -637,6 +797,33 @@ class CodexClient:
         session = _TurnSession(thread_id=active_thread_id, turn_id=turn_id)
         self._turn_sessions[turn_id] = session
         return active_thread_id, session
+
+    async def _prepare_thread_context(
+        self,
+        *,
+        thread_id: str | None,
+        metadata: Mapping[str, Any] | None,
+        thread_config: ThreadConfig | None,
+    ) -> str:
+        """Start or resume a thread and return the active thread id."""
+        if thread_id is None:
+            thread_params = _thread_config_to_params(thread_config)
+            if metadata:
+                thread_params["metadata"] = dict(metadata)
+            thread_result = await self.request(THREAD_START_METHOD, thread_params)
+            active_thread_id = _extract_thread_id(thread_result)
+            if not active_thread_id:
+                raise CodexProtocolError("thread/start succeeded but no thread id found")
+            return active_thread_id
+
+        resume_params: dict[str, Any] = {"threadId": thread_id}
+        resume_params.update(_thread_config_to_params(thread_config))
+        try:
+            await self.request(THREAD_RESUME_METHOD, resume_params)
+        except CodexProtocolError:
+            if self._strict:
+                raise
+        return thread_id
 
     def _get_continuation_session(
         self,
@@ -906,6 +1093,97 @@ class CodexClient:
                     "params": {"message": str(exc)},
                 }
             )
+
+
+def _is_unset(value: Any) -> bool:
+    return isinstance(value, UnsetType)
+
+
+def _thread_config_to_params(config: ThreadConfig | None) -> dict[str, Any]:
+    """Encode `ThreadConfig` into protocol params (camelCase), omitting UNSET."""
+    if config is None:
+        return {}
+
+    mapping: tuple[tuple[str, str], ...] = (
+        ("cwd", "cwd"),
+        ("base_instructions", "baseInstructions"),
+        ("developer_instructions", "developerInstructions"),
+        ("model", "model"),
+        ("model_provider", "modelProvider"),
+        ("approval_policy", "approvalPolicy"),
+        ("sandbox", "sandbox"),
+        ("personality", "personality"),
+        ("ephemeral", "ephemeral"),
+        ("config", "config"),
+    )
+    params: dict[str, Any] = {}
+    for attr_name, key_name in mapping:
+        value = getattr(config, attr_name)
+        if _is_unset(value):
+            continue
+        params[key_name] = value
+    return params
+
+
+def _turn_overrides_to_params(overrides: TurnOverrides | None) -> dict[str, Any]:
+    """Encode `TurnOverrides` into protocol params (camelCase), omitting UNSET."""
+    if overrides is None:
+        return {}
+
+    mapping: tuple[tuple[str, str], ...] = (
+        ("cwd", "cwd"),
+        ("model", "model"),
+        ("effort", "effort"),
+        ("summary", "summary"),
+        ("sandbox_policy", "sandboxPolicy"),
+        ("personality", "personality"),
+        ("approval_policy", "approvalPolicy"),
+        ("output_schema", "outputSchema"),
+    )
+    params: dict[str, Any] = {}
+    for attr_name, key_name in mapping:
+        value = getattr(overrides, attr_name)
+        if _is_unset(value):
+            continue
+        params[key_name] = value
+    return params
+
+
+def _merge_thread_config(base: ThreadConfig, override: ThreadConfig | None) -> ThreadConfig:
+    """Merge two thread configs where override values replace non-UNSET base values."""
+    if override is None:
+        return ThreadConfig(
+            cwd=base.cwd,
+            base_instructions=base.base_instructions,
+            developer_instructions=base.developer_instructions,
+            model=base.model,
+            model_provider=base.model_provider,
+            approval_policy=base.approval_policy,
+            sandbox=base.sandbox,
+            personality=base.personality,
+            ephemeral=base.ephemeral,
+            config=base.config,
+        )
+
+    def pick(base_value: Any, override_value: Any) -> Any:
+        if _is_unset(override_value):
+            return base_value
+        return override_value
+
+    return ThreadConfig(
+        cwd=pick(base.cwd, override.cwd),
+        base_instructions=pick(base.base_instructions, override.base_instructions),
+        developer_instructions=pick(
+            base.developer_instructions, override.developer_instructions
+        ),
+        model=pick(base.model, override.model),
+        model_provider=pick(base.model_provider, override.model_provider),
+        approval_policy=pick(base.approval_policy, override.approval_policy),
+        sandbox=pick(base.sandbox, override.sandbox),
+        personality=pick(base.personality, override.personality),
+        ephemeral=pick(base.ephemeral, override.ephemeral),
+        config=pick(base.config, override.config),
+    )
 
 
 def _default_stdio_command() -> list[str]:

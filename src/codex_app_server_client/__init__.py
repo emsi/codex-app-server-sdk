@@ -1,4 +1,4 @@
-from .client import CodexClient
+from .client import CodexClient, ThreadHandle
 from .errors import (
     CodexError,
     CodexProtocolError,
@@ -12,6 +12,11 @@ from .models import (
     ChatResult,
     ConversationStep,
     InitializeResult,
+    ReasoningEffort,
+    ReasoningSummary,
+    ThreadConfig,
+    TurnOverrides,
+    UNSET,
 )
 
 __all__ = [
@@ -26,4 +31,10 @@ __all__ = [
     "CodexTurnInactiveError",
     "ConversationStep",
     "InitializeResult",
+    "ReasoningEffort",
+    "ReasoningSummary",
+    "ThreadConfig",
+    "ThreadHandle",
+    "TurnOverrides",
+    "UNSET",
 ]

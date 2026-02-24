@@ -9,6 +9,7 @@ It gives you a convenient conversation API over `stdio` or `websocket` without h
 - simple one-shot turns with `chat_once(...)`
 - step-streaming turns with `chat(...)` (`thinking`, `exec`, `codex`, etc.), non-delta
 - built-in thread/turn lifecycle handling
+- thread-scoped config + forking via `ThreadHandle`
 - inactivity timeout continuation for long-running turns
 - turn cancellation with unread-step/event drain via `cancel(...)`
 - optional low-level `request(...)` access when needed
@@ -91,6 +92,46 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## Advanced thread control (cwd/instructions/model/fork)
+
+Use explicit thread handles when you need thread-scoped configuration.
+
+```python
+import asyncio
+from codex_app_server_client import CodexClient, ThreadConfig, TurnOverrides
+
+
+async def main() -> None:
+    async with CodexClient.connect_stdio() as client:
+        thread = await client.start_thread(
+            ThreadConfig(
+                cwd="/home/me/project",
+                base_instructions="You are concise.",
+                developer_instructions="Prefer rg over grep.",
+                model="gpt-5",
+            )
+        )
+
+        result = await thread.chat_once("Summarize the repo layout.")
+        print(result.final_text)
+
+        await thread.update_defaults(ThreadConfig(model="gpt-5-mini"))
+        forked = await thread.fork(
+            overrides=ThreadConfig(
+                developer_instructions="Focus on tests first.",
+            )
+        )
+
+        async for step in forked.chat(
+            "Run a quick diagnostics pass.",
+            turn_overrides=TurnOverrides(effort="low"),
+        ):
+            print(step.step_type, step.text)
+
+
+asyncio.run(main())
+```
+
 ## Example clients
 
 More complete examples are under `examples/`.
@@ -133,6 +174,15 @@ Common options:
 - `--inactivity-timeout 120`
 - `--show-data`
 - `--cancel-on-timeout`
+
+### Advanced thread config + fork example
+
+```bash
+uv run python examples/thread_config_and_fork.py \
+  --cwd . \
+  --base-instructions "Be concise." \
+  --developer-instructions "Prioritize correctness."
+```
 
 ### Stdio example (multi-turn, one thread)
 
@@ -180,8 +230,12 @@ uv run python examples/chat_session_websocket.py
 - `start()`: connect transport and start receive loop (idempotent).
 - `initialize(params=None, timeout=None)`: perform JSON-RPC initialize handshake with default-merged params (`protocolVersion`, `clientInfo`, `capabilities`) and return normalized `InitializeResult`.
 - `request(method, params=None, timeout=None)`: low-level JSON-RPC request helper.
-- `chat(text=None, thread_id=None, user=None, metadata=None, inactivity_timeout=None, continuation=None)`: async iterator yielding completed non-delta step blocks.
-- `chat_once(text=None, thread_id=None, user=None, metadata=None, inactivity_timeout=None, continuation=None)`: send one user message and wait for completed turn.
+- `start_thread(config=None)`: create thread and return `ThreadHandle`.
+- `resume_thread(thread_id, overrides=None)`: resume thread and return `ThreadHandle`.
+- `fork_thread(thread_id, overrides=None)`: fork thread and return `ThreadHandle`.
+- `set_thread_defaults(thread_id, overrides)`: apply thread-level overrides via `thread/resume`.
+- `chat(text=None, thread_id=None, user=None, metadata=None, thread_config=None, turn_overrides=None, inactivity_timeout=None, continuation=None)`: async iterator yielding completed non-delta step blocks.
+- `chat_once(text=None, thread_id=None, user=None, metadata=None, thread_config=None, turn_overrides=None, inactivity_timeout=None, continuation=None)`: send one user message and wait for completed turn.
 - `cancel(continuation, timeout=None)`: interrupt running turn, return unread steps/events, and clean turn state.
 - `interrupt_turn(turn_id, timeout=None)`: low-level turn interruption request.
 - `close()`: cancel receive loop and close transport.
@@ -199,6 +253,19 @@ uv run python examples/chat_session_websocket.py
 - `ChatResult`: buffered turn output (`thread_id`, `turn_id`, `final_text`, `raw_events`, `assistant_item_id`, `completion_source`).
 - `ChatContinuation`: continuation token for timed-out running turns (`thread_id`, `turn_id`, `cursor`, `mode`).
 - `CancelResult`: cancellation result with unread `steps`/`raw_events` plus terminal flags.
+- `ThreadConfig`: thread-level config for `thread/start`, `thread/resume`, `thread/fork` (`cwd`, `base_instructions`, `developer_instructions`, `model`, ...).
+- `TurnOverrides`: per-turn overrides forwarded to `turn/start` (`cwd`, `model`, `effort`, ...).
+- `UNSET`: sentinel for “omit this field from request payload.”
+
+### `ThreadHandle` (`src/codex_app_server_client/client.py`)
+
+- `thread_id`: bound thread id.
+- `defaults`: local thread config snapshot.
+- `chat_once(...)`: convenience one-turn call bound to this thread.
+- `chat(...)`: step-streaming call bound to this thread.
+- `update_defaults(overrides)`: apply thread defaults between messages.
+- `fork(overrides=None)`: fork thread and get a new handle.
+- `read(include_turns=True)`: low-level thread/read helper.
 
 ### Exceptions (`src/codex_app_server_client/errors.py`)
 
@@ -216,6 +283,7 @@ uv run python examples/chat_session_websocket.py
 - `turn_timeout` is intentionally removed to avoid conflicting timeout semantics.
 - Turn waits are controlled by `inactivity_timeout` (or unbounded when `None`).
 - `cancel(...)` interrupts a continuation turn, returns unread buffered data, and cleans internal session state so the same thread can be reused safely.
+- Advanced thread-level config/fork uses protocol v2 methods (`thread/start`, `thread/resume`, `thread/fork`) exposed via `ThreadHandle` and `ThreadConfig`.
 - preferred lifecycle is `async with CodexClient.connect_*() as client:`; manual `start()/close()` remains available for advanced control.
 - The client uses modern thread/turn methods (`thread/start`, `thread/resume`, `turn/start`, `turn/interrupt`).
 - `initialize` currently sends `protocolVersion: "1"` as handshake metadata.

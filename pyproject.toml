@@ -1,6 +1,6 @@
 [project]
 name = "codex-app-server-sdk"
-version = "0.1.0"
+version = "0.2.0"
 description = "Async Python client for Codex app-server over stdio and websocket."
 readme = "README.md"
 license = { file = "LICENSE" }

@@ -29,12 +29,9 @@ from codex_app_server_client import CodexClient
 
 
 async def main() -> None:
-    client = await CodexClient.connect_stdio()
-    try:
+    async with CodexClient.connect_stdio() as client:
         result = await client.chat_once("Hello from Python")
         print(result.final_text)
-    finally:
-        await client.close()
 
 
 asyncio.run(main())
@@ -55,12 +52,9 @@ from codex_app_server_client import CodexClient
 
 
 async def main() -> None:
-    client = await CodexClient.connect_websocket()
-    try:
+    async with CodexClient.connect_websocket() as client:
         result = await client.chat_once("Hello over websocket")
         print(result.final_text)
-    finally:
-        await client.close()
 
 
 asyncio.run(main())
@@ -80,8 +74,7 @@ from codex_app_server_client import CodexClient, CodexTurnInactiveError
 
 
 async def main() -> None:
-    client = await CodexClient.connect_stdio(inactivity_timeout=120.0)
-    try:
+    async with CodexClient.connect_stdio(inactivity_timeout=120.0) as client:
         continuation = None
         while True:
             try:
@@ -93,8 +86,6 @@ async def main() -> None:
                 break
             except CodexTurnInactiveError as exc:
                 continuation = exc.continuation
-    finally:
-        await client.close()
 
 
 asyncio.run(main())
@@ -184,9 +175,9 @@ uv run python examples/chat_session_websocket.py
 
 ### `CodexClient` (`src/codex_app_server_client/client.py`)
 
-- `connect_stdio(...)`: create + connect client over subprocess stdio.
-- `connect_websocket(...)`: create + connect client over websocket.
-- `start()`: connect transport and start receive loop.
+- `connect_stdio(...)`: create a stdio-configured client (unstarted).
+- `connect_websocket(...)`: create a websocket-configured client (unstarted).
+- `start()`: connect transport and start receive loop (idempotent).
 - `initialize(params=None, timeout=None)`: perform JSON-RPC initialize handshake.
 - `request(method, params=None, timeout=None)`: low-level JSON-RPC request helper.
 - `chat(text=None, thread_id=None, user=None, metadata=None, inactivity_timeout=None, continuation=None)`: async iterator yielding completed non-delta step blocks.
@@ -225,6 +216,7 @@ uv run python examples/chat_session_websocket.py
 - `turn_timeout` is intentionally removed to avoid conflicting timeout semantics.
 - Turn waits are controlled by `inactivity_timeout` (or unbounded when `None`).
 - `cancel(...)` interrupts a continuation turn, returns unread buffered data, and cleans internal session state so the same thread can be reused safely.
+- preferred lifecycle is `async with CodexClient.connect_*() as client:`; manual `start()/close()` remains available for advanced control.
 - The client uses modern thread/turn methods (`thread/start`, `thread/resume`, `turn/start`, `turn/interrupt`).
 - `initialize` currently sends `protocolVersion: "1"` as handshake metadata.
 - Websocket transport targets `websockets` (`>=16,<17`), uses `additional_headers`, and disables compression by default (`compression=None`) for codex app-server compatibility.

@@ -109,39 +109,38 @@ async def run_session(args: argparse.Namespace) -> int:
     command = shlex.split(args.cmd) if args.cmd else None
     inactivity_timeout = _normalize_timeout(args.inactivity_timeout)
 
-    client = await CodexClient.connect_stdio(
-        command=command,
-        inactivity_timeout=inactivity_timeout,
-    )
-
     thread_id: str | None = None
     try:
-        init = await client.initialize()
-        protocol = init.protocol_version or "unknown"
-        print(f"[init] protocol_version={protocol}")
+        async with CodexClient.connect_stdio(
+            command=command,
+            inactivity_timeout=inactivity_timeout,
+        ) as client:
+            init = await client.initialize()
+            protocol = init.protocol_version or "unknown"
+            print(f"[init] protocol_version={protocol}")
 
-        for index, prompt in enumerate(prompts, start=1):
-            print(f"\n[user:{index}] {prompt}")
-            thread_id, result_obj = await _chat_once_with_resume(
-                client,
-                prompt=prompt,
-                thread_id=thread_id,
-                user=args.user,
-                metadata={
-                    "example": "stdio",
-                    "turn_index": index,
-                    "client": "codex-app-server-client",
-                },
-                inactivity_timeout=inactivity_timeout,
-            )
-            result = result_obj
-            print(f"[assistant:{index}] {result.final_text}")
-            print(
-                "[meta]"
-                f" thread_id={result.thread_id}"
-                f" turn_id={result.turn_id}"
-                f" events={len(result.raw_events)}"
-            )
+            for index, prompt in enumerate(prompts, start=1):
+                print(f"\n[user:{index}] {prompt}")
+                thread_id, result_obj = await _chat_once_with_resume(
+                    client,
+                    prompt=prompt,
+                    thread_id=thread_id,
+                    user=args.user,
+                    metadata={
+                        "example": "stdio",
+                        "turn_index": index,
+                        "client": "codex-app-server-client",
+                    },
+                    inactivity_timeout=inactivity_timeout,
+                )
+                result = result_obj
+                print(f"[assistant:{index}] {result.final_text}")
+                print(
+                    "[meta]"
+                    f" thread_id={result.thread_id}"
+                    f" turn_id={result.turn_id}"
+                    f" events={len(result.raw_events)}"
+                )
         return 0
     except CodexTimeoutError as exc:
         print(f"[error] timeout: {exc}", file=sys.stderr)
@@ -156,8 +155,6 @@ async def run_session(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("\n[interrupt] user cancelled session", file=sys.stderr)
         return 130
-    finally:
-        await client.close()
 
 
 def main() -> None:

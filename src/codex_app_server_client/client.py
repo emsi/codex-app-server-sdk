@@ -95,10 +95,11 @@ class CodexClient:
 
         self._send_lock = asyncio.Lock()
         self._receiver_task: asyncio.Task[None] | None = None
+        self._started = False
         self._closed = False
 
     @classmethod
-    async def connect_stdio(
+    def connect_stdio(
         cls,
         *,
         command: Sequence[str] | None = None,
@@ -109,7 +110,7 @@ class CodexClient:
         inactivity_timeout: float | None = 180.0,
         strict: bool = False,
     ) -> CodexClient:
-        """Create and connect a client over stdio transport."""
+        """Create an unstarted client configured for stdio transport."""
         resolved_command = list(command) if command is not None else _default_stdio_command()
         transport = StdioTransport(
             resolved_command,
@@ -123,11 +124,10 @@ class CodexClient:
             inactivity_timeout=inactivity_timeout,
             strict=strict,
         )
-        await client.start()
         return client
 
     @classmethod
-    async def connect_websocket(
+    def connect_websocket(
         cls,
         *,
         url: str | None = None,
@@ -138,7 +138,7 @@ class CodexClient:
         inactivity_timeout: float | None = 180.0,
         strict: bool = False,
     ) -> CodexClient:
-        """Create and connect a client over websocket transport."""
+        """Create an unstarted client configured for websocket transport."""
         resolved_url = url or os.getenv("CODEX_APP_SERVER_WS_URL") or "ws://127.0.0.1:8765"
         resolved_token = token or os.getenv("CODEX_APP_SERVER_TOKEN")
         resolved_headers = dict(headers) if headers is not None else {}
@@ -156,13 +156,17 @@ class CodexClient:
             inactivity_timeout=inactivity_timeout,
             strict=strict,
         )
-        await client.start()
         return client
 
     async def start(self) -> CodexClient:
-        """Connect transport and start background receive loop."""
+        """Connect transport and start background receive loop once."""
+        if self._closed:
+            raise CodexTransportError("client is closed")
+        if self._started:
+            return self
         await self._transport.connect()
         self._start_receiver()
+        self._started = True
         return self
 
     async def __aenter__(self) -> CodexClient:
@@ -194,6 +198,7 @@ class CodexClient:
         self._deferred_notifications.clear()
 
         await self._transport.close()
+        self._started = False
 
     async def initialize(
         self,

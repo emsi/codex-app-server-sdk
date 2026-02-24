@@ -95,17 +95,17 @@ def _normalize_timeout(timeout: float) -> float | None:
     return timeout
 
 
-async def _connect_client(args: argparse.Namespace) -> CodexClient:
-    """Create and connect a client for the selected transport."""
+def _build_client(args: argparse.Namespace) -> CodexClient:
+    """Create a client for the selected transport."""
     inactivity_timeout = _normalize_timeout(args.inactivity_timeout)
     if args.transport == "stdio":
         command = shlex.split(args.cmd) if args.cmd else None
-        return await CodexClient.connect_stdio(
+        return CodexClient.connect_stdio(
             command=command,
             inactivity_timeout=inactivity_timeout,
         )
 
-    return await CodexClient.connect_websocket(
+    return CodexClient.connect_websocket(
         url=args.url,
         token=args.token,
         inactivity_timeout=inactivity_timeout,
@@ -177,78 +177,79 @@ async def run_session(args: argparse.Namespace) -> int:
     """Run multi-turn step-streaming chat and print rich blocks."""
     prompts = args.prompts or DEFAULT_PROMPTS
     inactivity_timeout = _normalize_timeout(args.inactivity_timeout)
-    client = await _connect_client(args)
+    client = _build_client(args)
     thread_id: str | None = None
 
     try:
-        init = await client.initialize()
-        protocol = init.protocol_version or "unknown"
-        if args.transport == "websocket":
-            print(
-                f"[init] protocol_version={protocol}"
-                f" transport=websocket url={args.url}"
-            )
-        else:
-            print(f"[init] protocol_version={protocol} transport=stdio")
+        async with client:
+            init = await client.initialize()
+            protocol = init.protocol_version or "unknown"
+            if args.transport == "websocket":
+                print(
+                    f"[init] protocol_version={protocol}"
+                    f" transport=websocket url={args.url}"
+                )
+            else:
+                print(f"[init] protocol_version={protocol} transport=stdio")
 
-        for index, prompt in enumerate(prompts, start=1):
-            print(f"\n[user:{index}] {prompt}")
-            step_count = 0
-            continuation: ChatContinuation | None = None
+            for index, prompt in enumerate(prompts, start=1):
+                print(f"\n[user:{index}] {prompt}")
+                step_count = 0
+                continuation: ChatContinuation | None = None
 
-            while True:
-                try:
-                    if continuation is None:
-                        stream = client.chat(
-                            prompt,
-                            thread_id=thread_id,
-                            user=args.user,
-                            metadata={
-                                "example": "steps-rich",
-                                "turn_index": index,
-                                "transport": args.transport,
-                            },
-                            inactivity_timeout=inactivity_timeout,
+                while True:
+                    try:
+                        if continuation is None:
+                            stream = client.chat(
+                                prompt,
+                                thread_id=thread_id,
+                                user=args.user,
+                                metadata={
+                                    "example": "steps-rich",
+                                    "turn_index": index,
+                                    "transport": args.transport,
+                                },
+                                inactivity_timeout=inactivity_timeout,
+                            )
+                        else:
+                            stream = client.chat(
+                                continuation=continuation,
+                                inactivity_timeout=inactivity_timeout,
+                            )
+
+                        async for step in stream:
+                            step_count += 1
+                            thread_id = step.thread_id
+                            _print_step(step, show_data=args.show_data)
+                        break
+                    except CodexTurnInactiveError as exc:
+                        continuation = exc.continuation
+                        print(
+                            "[warn]"
+                            f" turn inactive for {exc.idle_seconds:.1f}s"
+                            f" (thread_id={continuation.thread_id} turn_id={continuation.turn_id})",
+                            file=sys.stderr,
                         )
-                    else:
-                        stream = client.chat(
-                            continuation=continuation,
-                            inactivity_timeout=inactivity_timeout,
+
+                        if not args.cancel_on_timeout:
+                            print("[warn] resuming same turn...", file=sys.stderr)
+                            continue
+
+                        cancel_result = await client.cancel(continuation)
+                        for unread_step in cancel_result.steps:
+                            step_count += 1
+                            thread_id = unread_step.thread_id
+                            _print_step(unread_step, show_data=args.show_data)
+                        print(
+                            "[meta]"
+                            f" cancelled turn_id={cancel_result.turn_id}"
+                            f" unread_steps={len(cancel_result.steps)}"
+                            f" unread_events={len(cancel_result.raw_events)}",
+                            file=sys.stderr,
                         )
+                        break
 
-                    async for step in stream:
-                        step_count += 1
-                        thread_id = step.thread_id
-                        _print_step(step, show_data=args.show_data)
-                    break
-                except CodexTurnInactiveError as exc:
-                    continuation = exc.continuation
-                    print(
-                        "[warn]"
-                        f" turn inactive for {exc.idle_seconds:.1f}s"
-                        f" (thread_id={continuation.thread_id} turn_id={continuation.turn_id})",
-                        file=sys.stderr,
-                    )
-
-                    if not args.cancel_on_timeout:
-                        print("[warn] resuming same turn...", file=sys.stderr)
-                        continue
-
-                    cancel_result = await client.cancel(continuation)
-                    for unread_step in cancel_result.steps:
-                        step_count += 1
-                        thread_id = unread_step.thread_id
-                        _print_step(unread_step, show_data=args.show_data)
-                    print(
-                        "[meta]"
-                        f" cancelled turn_id={cancel_result.turn_id}"
-                        f" unread_steps={len(cancel_result.steps)}"
-                        f" unread_events={len(cancel_result.raw_events)}",
-                        file=sys.stderr,
-                    )
-                    break
-
-            print(f"[meta] thread_id={thread_id or '-'} steps={step_count}")
+                print(f"[meta] thread_id={thread_id or '-'} steps={step_count}")
 
         return 0
     except CodexTimeoutError as exc:
@@ -264,8 +265,6 @@ async def run_session(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("\n[interrupt] user cancelled session", file=sys.stderr)
         return 130
-    finally:
-        await client.close()
 
 
 def main() -> None:

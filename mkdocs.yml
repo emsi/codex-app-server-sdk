@@ -1,0 +1,54 @@
+site_name: codex-app-server-sdk
+site_description: Async Python client for codex app-server over stdio and websocket.
+site_url: https://emsi.github.io/codex-app-server-client/
+docs_dir: docs
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths:
+            - src
+          options:
+            show_root_heading: true
+            show_root_full_path: false
+            show_source: false
+            inherited_members: true
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - tables
+  - def_list
+  - attr_list
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Transports: transports.md
+  - Conversation APIs: conversation.md
+  - Timeouts, continuation, cancel: timeouts-continuation-cancel.md
+  - Threads and configuration: threads-and-config.md
+  - Examples: examples.md
+  - Protocol mapping: protocol-mapping.md
+  - Behavior guarantees: behavior-guarantees.md
+  - API reference:
+      - Overview: api/index.md
+      - Package exports: api/package.md
+      - client: api/client.md
+      - transport: api/transport.md
+      - models: api/models.md
+      - errors: api/errors.md
+      - protocol: api/protocol.md

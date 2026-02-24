@@ -247,9 +247,7 @@ def _print_thread_list(payload: Any, *, limit: int, show_data: bool) -> None:
         return
     items = _extract_items(payload, keys=("data", "threads"))
     next_found, next_value = (
-        _get_field(payload, "nextCursor", "next_cursor")
-        if isinstance(payload, Mapping)
-        else (False, None)
+        _get_field(payload, "nextCursor", "next_cursor") if isinstance(payload, Mapping) else (False, None)
     )
     showing = min(limit, len(items))
     print(
@@ -285,9 +283,7 @@ def _print_model_list(payload: Any, *, limit: int, show_data: bool) -> None:
         return
     items = _extract_items(payload, keys=("data", "models"))
     next_found, next_value = (
-        _get_field(payload, "nextCursor", "next_cursor")
-        if isinstance(payload, Mapping)
-        else (False, None)
+        _get_field(payload, "nextCursor", "next_cursor") if isinstance(payload, Mapping) else (False, None)
     )
     showing = min(limit, len(items))
     print(
@@ -298,9 +294,7 @@ def _print_model_list(payload: Any, *, limit: int, show_data: bool) -> None:
     for index, item in enumerate(items[:limit], start=1):
         id_found, id_value = _get_field(item, "id")
         display_found, display_value = _get_field(item, "displayName", "display_name", "title")
-        provider_found, provider_value = _get_field(
-            item, "provider", "modelProvider", "model_provider"
-        )
+        provider_found, provider_value = _get_field(item, "provider", "modelProvider", "model_provider")
         model_found, model_value = _get_field(item, "model")
         effort_found, effort_value = _get_field(
             item, "defaultReasoningEffort", "default_reasoning_effort"
@@ -344,15 +338,11 @@ def _print_config_read(payload: Any, *, show_data: bool) -> None:
     else:
         origins_count = None
     model_found, model_value = _get_field(config, "model", "modelId")
-    provider_found, provider_value = _get_field(
-        config, "model_provider", "modelProvider", "provider"
-    )
+    provider_found, provider_value = _get_field(config, "model_provider", "modelProvider", "provider")
     approval_found, approval_value = _get_field(config, "approval_policy", "approvalPolicy")
     sandbox_found, sandbox_value = _get_field(config, "sandbox_mode", "sandboxMode", "sandbox")
     personality_found, personality_value = _get_field(config, "personality")
-    effort_found, effort_value = _get_field(
-        config, "model_reasoning_effort", "modelReasoningEffort"
-    )
+    effort_found, effort_value = _get_field(config, "model_reasoning_effort", "modelReasoningEffort")
     parts = [
         f"model={_display_value(model_found, model_value)}",
         f"approval_policy={_display_value(approval_found, approval_value)}",

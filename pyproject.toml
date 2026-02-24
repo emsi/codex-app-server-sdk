@@ -30,6 +30,10 @@ dependencies = [
     "websockets>=16,<17",
 ]
 
+[project.urls]
+Documentation = "https://emsi.github.io/codex-app-server-client/"
+Repository = "https://github.com/emsi/codex-app-server-client"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -37,6 +41,12 @@ build-backend = "hatchling.build"
 [project.optional-dependencies]
 dev = [
     "build>=1.2.2",
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.6.0",
+    "mkdocstrings[python]>=0.28.0",
+    "mkdocs-gen-files>=0.5.0",
+    "mkdocs-literate-nav>=0.6.1",
+    "mkdocs-section-index>=0.3.10",
     "pytest>=8.2.0",
     "twine>=6.0.1",
 ]
@@ -46,6 +56,12 @@ dev = [
     "basedpyright>=1.38.1",
     "black>=26.1.0",
     "build>=1.2.2",
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.6.0",
+    "mkdocstrings[python]>=0.28.0",
+    "mkdocs-gen-files>=0.5.0",
+    "mkdocs-literate-nav>=0.6.1",
+    "mkdocs-section-index>=0.3.10",
     "mypy>=1.19.1",
     "pytest>=9.0.2",
     "ruff>=0.15.2",

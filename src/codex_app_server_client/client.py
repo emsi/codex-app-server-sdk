@@ -339,18 +339,20 @@ class CodexClient:
         *,
         timeout: float | None = None,
     ) -> InitializeResult:
-        """
-        Perform the app-server initialize handshake and cache client initialization state.
+        """Perform initialize handshake and cache client initialization state.
 
         This method is optional for normal chat usage because `chat_once()` and `chat()`
         initialize automatically on first use. Call it explicitly when you want to fail
         fast on handshake issues or inspect server protocol/capabilities metadata.
 
-        :param params: Optional initialize request payload. The payload is merged with
-            library defaults via `_prepare_initialize_params()`, including capability
-            opt-out defaults when applicable.
-        :param timeout: Optional per-request timeout override in seconds.
-        :return: Parsed initialize result containing normalized protocol/server fields
+        Args:
+            params: Optional initialize request payload. The payload is merged with
+                library defaults via `_prepare_initialize_params()`, including capability
+                opt-out defaults when applicable.
+            timeout: Optional per-request timeout override in seconds.
+
+        Returns:
+            Parsed initialize result containing normalized protocol/server fields
             and raw initialize payload.
         """
         payload = _prepare_initialize_params(params)
@@ -1411,8 +1413,7 @@ def _default_stdio_command() -> list[str]:
 def _prepare_initialize_params(
     params: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    """
-    Merge caller-provided initialize params with library default params.
+    """Merge caller-provided initialize params with library defaults.
 
     Merge behavior:
     - start with `_default_initialize_params()`;
@@ -1421,8 +1422,11 @@ def _prepare_initialize_params(
       `optOutNotificationMethods`, inject the default opt-out list;
     - if caller provides explicit `capabilities.optOutNotificationMethods`, keep it.
 
-    :param params: Optional caller initialize payload.
-    :return: Final initialize payload sent to the server.
+    Args:
+        params: Optional caller initialize payload.
+
+    Returns:
+        Final initialize payload sent to the server.
     """
     payload = _default_initialize_params()
     if params is None:
@@ -1448,8 +1452,7 @@ def _prepare_initialize_params(
 
 
 def _default_initialize_params() -> dict[str, Any]:
-    """
-    Build the default initialize payload for Codex app-server.
+    """Build the default initialize payload for Codex app-server.
 
     The default payload currently includes:
     - `protocolVersion`: protocol version string sent by this client;
@@ -1457,7 +1460,8 @@ def _default_initialize_params() -> dict[str, Any]:
     - `capabilities.optOutNotificationMethods`: compat event opt-outs used by
       default to reduce duplicate/legacy notification streams.
 
-    :return: Default initialize payload map.
+    Returns:
+        Default initialize payload map.
     """
     return {
         "protocolVersion": "1",

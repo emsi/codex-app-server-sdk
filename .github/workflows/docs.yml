@@ -1,0 +1,84 @@
+name: docs
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  docs-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Build docs (strict)
+        run: uv run mkdocs build --strict
+
+      - name: Link check
+        uses: lycheeverse/lychee-action@v2
+        with:
+          fail: true
+          args: >-
+            --verbose
+            --no-progress
+            --accept 200,429
+            --max-retries 2
+            --retry-wait-time 2
+            ./README.md
+            ./docs/**/*.md
+            ./site/**/*.html
+
+  docs-deploy:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs: docs-check
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Build docs (strict)
+        run: uv run mkdocs build --strict
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

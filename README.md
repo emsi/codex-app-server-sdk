@@ -20,6 +20,23 @@ It gives you a convenient conversation API over `stdio` or `websocket` without h
 uv sync
 ```
 
+## Documentation
+
+Full docs are built with MkDocs (Material + mkdocstrings) from source code
+docstrings, README guidance, and example workflows.
+
+- hosted site (GitHub Pages): `https://emsi.github.io/codex-app-server-client/`
+
+Local docs commands:
+
+```bash
+uv run mkdocs serve
+```
+
+```bash
+uv run mkdocs build --strict
+```
+
 ## Quick start
 
 ### Stdio

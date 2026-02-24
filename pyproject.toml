@@ -1,12 +1,30 @@
 [project]
-name = "codex-app-server-client"
+name = "codex-app-server-sdk"
 version = "0.1.0"
 description = "Async Python client for Codex app-server over stdio and websocket."
 readme = "README.md"
+license = { file = "LICENSE" }
 authors = [
     { name = "Mariusz Woloszyn", email = "emsi@users.noreply.github.com" }
 ]
 requires-python = ">=3.12"
+keywords = [
+    "codex",
+    "app-server",
+    "json-rpc",
+    "asyncio",
+    "websocket",
+    "stdio",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
 dependencies = [
     "pydantic>=2.8.0",
     "websockets>=16,<17",
@@ -18,14 +36,21 @@ build-backend = "hatchling.build"
 
 [project.optional-dependencies]
 dev = [
+    "build>=1.2.2",
     "pytest>=8.2.0",
+    "twine>=6.0.1",
 ]
 
 [dependency-groups]
 dev = [
     "basedpyright>=1.38.1",
     "black>=26.1.0",
+    "build>=1.2.2",
     "mypy>=1.19.1",
     "pytest>=9.0.2",
     "ruff>=0.15.2",
+    "twine>=6.0.1",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codex_app_server_client"]

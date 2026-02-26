@@ -6,7 +6,7 @@ import os
 import shlex
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Coroutine, Literal
 
 from .errors import (
     CodexProtocolError,
@@ -15,10 +15,16 @@ from .errors import (
     CodexTurnInactiveError,
 )
 from .models import (
+    ApprovalRequest,
     CancelResult,
     ChatContinuation,
     ChatResult,
+    CommandApprovalDecision,
+    CommandApprovalRequest,
+    CommandApprovalWithExecpolicyAmendment,
     ConversationStep,
+    FileChangeApprovalDecision,
+    FileChangeApprovalRequest,
     InitializeResult,
     ThreadConfig,
     TurnOverrides,
@@ -32,7 +38,9 @@ from .protocol import (
     CONFIG_VALUE_WRITE_METHOD,
     DEFAULT_OPT_OUT_NOTIFICATION_METHODS,
     INITIALIZE_METHOD,
+    ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL_METHOD,
     ITEM_COMPLETED_METHOD,
+    ITEM_FILE_CHANGE_REQUEST_APPROVAL_METHOD,
     MODEL_LIST_METHOD,
     REVIEW_START_METHOD,
     THREAD_ARCHIVE_METHOD,
@@ -53,6 +61,7 @@ from .protocol import (
     is_turn_completed,
     is_turn_failed,
     make_error_response,
+    make_result_response,
     make_request,
 )
 from .transport import StdioTransport, Transport, WebSocketTransport
@@ -77,6 +86,9 @@ class _TurnSession:
     failed: bool = False
     failure_message: str | None = None
     interrupted: bool = False
+
+
+_APPROVAL_QUEUE_STOP = object()
 
 
 class ThreadHandle:
@@ -318,6 +330,16 @@ class CodexClient:
         self._notifications: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._deferred_notifications: list[dict[str, Any]] = []
         self._turn_sessions: dict[str, _TurnSession] = {}
+        self._approval_requests: asyncio.Queue[ApprovalRequest | object] = asyncio.Queue()
+        self._pending_approval_requests: dict[int | str, ApprovalRequest] = {}
+        self._approval_handler: (
+            Callable[
+                [ApprovalRequest],
+                Awaitable[CommandApprovalDecision | FileChangeApprovalDecision],
+            ]
+            | None
+        ) = None
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
         self._send_lock = asyncio.Lock()
         self._receiver_task: asyncio.Task[None] | None = None
@@ -457,8 +479,18 @@ class CodexClient:
                 future.set_exception(CodexTransportError("client is closing"))
         self._pending.clear()
 
+        for task in list(self._background_tasks):
+            task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        self._background_tasks.clear()
+
+        self._pending_approval_requests.clear()
+        self._approval_handler = None
+
         self._turn_sessions.clear()
         self._deferred_notifications.clear()
+        self._approval_requests.put_nowait(_APPROVAL_QUEUE_STOP)
 
         await self._transport.close()
         self._started = False
@@ -556,6 +588,94 @@ class CodexClient:
                 data=data,
             )
         return response.get("result")
+
+    def set_approval_handler(
+        self,
+        handler: (
+            Callable[
+                [ApprovalRequest],
+                Awaitable[CommandApprovalDecision | FileChangeApprovalDecision],
+            ]
+            | None
+        ),
+    ) -> None:
+        """Set or clear async handler for v2 approval requests.
+
+        The handler is invoked for:
+        - `item/commandExecution/requestApproval`
+        - `item/fileChange/requestApproval`
+
+        If no handler is configured, requests are auto-declined.
+        """
+        self._approval_handler = handler
+
+    async def approval_requests(self) -> AsyncIterator[ApprovalRequest]:
+        """Yield parsed approval requests from the server.
+
+        This stream is observational; automatic callback handling (or auto-decline
+        default) still applies.
+        """
+        while True:
+            item = await self._approval_requests.get()
+            if item is _APPROVAL_QUEUE_STOP:
+                self._approval_requests.put_nowait(_APPROVAL_QUEUE_STOP)
+                return
+            if isinstance(item, (CommandApprovalRequest, FileChangeApprovalRequest)):
+                yield item
+
+    async def respond_approval(
+        self,
+        request: ApprovalRequest,
+        decision: CommandApprovalDecision | FileChangeApprovalDecision,
+    ) -> None:
+        """Respond to one pending approval request."""
+        pending = self._pending_approval_requests.get(request.request_id)
+        if pending is None:
+            raise CodexProtocolError("approval request is no longer pending")
+
+        if type(pending) is not type(request):
+            raise CodexProtocolError("approval request type mismatch")
+
+        self._pending_approval_requests.pop(request.request_id, None)
+        result_payload = _encode_approval_result(request, decision)
+        response = make_result_response(request.request_id, result_payload)
+        async with self._send_lock:
+            await self._transport.send(response)
+
+    async def approve_approval(
+        self,
+        request: ApprovalRequest,
+        *,
+        for_session: bool = False,
+        execpolicy_amendment: Sequence[str] | None = None,
+    ) -> None:
+        """Convenience helper to approve an approval request."""
+        if isinstance(request, FileChangeApprovalRequest):
+            if execpolicy_amendment is not None:
+                raise ValueError(
+                    "execpolicy_amendment is not applicable to file-change approvals"
+                )
+            decision: FileChangeApprovalDecision = (
+                "accept_for_session" if for_session else "accept"
+            )
+            await self.respond_approval(request, decision)
+            return
+
+        if execpolicy_amendment is not None:
+            decision_cmd: CommandApprovalDecision = CommandApprovalWithExecpolicyAmendment(
+                execpolicy_amendment=list(execpolicy_amendment)
+            )
+        else:
+            decision_cmd = "accept_for_session" if for_session else "accept"
+        await self.respond_approval(request, decision_cmd)
+
+    async def decline_approval(self, request: ApprovalRequest) -> None:
+        """Convenience helper to decline an approval request and continue turn."""
+        await self.respond_approval(request, "decline")
+
+    async def cancel_approval(self, request: ApprovalRequest) -> None:
+        """Convenience helper to decline an approval request and cancel turn."""
+        await self.respond_approval(request, "cancel")
 
     async def start_thread(self, config: ThreadConfig | None = None) -> ThreadHandle:
         """Create a new thread and return a bound handle.
@@ -1612,6 +1732,9 @@ class CodexClient:
 
     def _cleanup_turn_state(self, turn_id: str) -> None:
         self._turn_sessions.pop(turn_id, None)
+        for request_id, request in list(self._pending_approval_requests.items()):
+            if request.turn_id == turn_id:
+                self._pending_approval_requests.pop(request_id, None)
         self._drop_deferred_for_turn(turn_id)
 
     def _drop_deferred_for_turn(self, turn_id: str) -> None:
@@ -1666,6 +1789,14 @@ class CodexClient:
                 if "id" in payload and payload.get("id") is not None:
                     request_id = payload["id"]
                     if isinstance(request_id, (int, str)):
+                        handled = await self._handle_server_request(
+                            request_id=request_id,
+                            method=method,
+                            payload=payload,
+                        )
+                        if handled:
+                            await self._notifications.put(payload)
+                            continue
                         error_response = make_error_response(
                             request_id,
                             -32601,
@@ -1692,6 +1823,83 @@ class CodexClient:
                     "params": {"message": str(exc)},
                 }
             )
+
+    async def _handle_server_request(
+        self,
+        *,
+        request_id: int | str,
+        method: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        if method not in {
+            ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL_METHOD,
+            ITEM_FILE_CHANGE_REQUEST_APPROVAL_METHOD,
+        }:
+            return False
+
+        params = payload.get("params")
+        if not isinstance(params, Mapping):
+            error = make_error_response(
+                request_id,
+                -32602,
+                f"{method} received invalid params",
+            )
+            async with self._send_lock:
+                await self._transport.send(error)
+            return True
+
+        try:
+            request = _parse_approval_request(
+                request_id=request_id,
+                method=method,
+                params=params,
+            )
+        except CodexProtocolError as exc:
+            error = make_error_response(request_id, -32602, str(exc))
+            async with self._send_lock:
+                await self._transport.send(error)
+            return True
+
+        self._pending_approval_requests[request_id] = request
+        await self._approval_requests.put(request)
+
+        if self._approval_handler is None:
+            self._spawn_background_task(self._auto_decline_approval(request))
+        else:
+            self._spawn_background_task(self._run_approval_handler(request))
+        return True
+
+    def _spawn_background_task(self, coro: Coroutine[Any, Any, Any]) -> None:
+        task: asyncio.Task[Any] = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _auto_decline_approval(self, request: ApprovalRequest) -> None:
+        with contextlib.suppress(CodexProtocolError, CodexTransportError):
+            await self.respond_approval(request, "decline")
+
+    async def _run_approval_handler(self, request: ApprovalRequest) -> None:
+        handler = self._approval_handler
+        if handler is None:
+            await self._auto_decline_approval(request)
+            return
+
+        decision: CommandApprovalDecision | FileChangeApprovalDecision
+        try:
+            decision = await handler(request)
+        except Exception:
+            decision = "decline"
+
+        try:
+            await self.respond_approval(request, decision)
+        except ValueError:
+            with contextlib.suppress(CodexProtocolError, CodexTransportError):
+                await self.respond_approval(request, "decline")
+        except CodexProtocolError:
+            # Already handled (for example by explicit caller response).
+            return
+        except CodexTransportError:
+            return
 
 
 def _is_unset(value: Any) -> bool:
@@ -2048,6 +2256,100 @@ def _extract_item_text(item: Mapping[str, Any]) -> str | None:
                 return "\n".join(parts)
 
     return None
+
+
+def _parse_approval_request(
+    *,
+    request_id: int | str,
+    method: str,
+    params: Mapping[str, Any],
+) -> ApprovalRequest:
+    if method == ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL_METHOD:
+        command_actions_value = params.get("commandActions")
+        command_actions: list[dict[str, Any]] | None = None
+        if isinstance(command_actions_value, list):
+            command_actions = [
+                dict(action) for action in command_actions_value if isinstance(action, Mapping)
+            ]
+
+        amendment_value = params.get("proposedExecpolicyAmendment")
+        proposed_execpolicy_amendment: list[str] | None = None
+        if isinstance(amendment_value, list):
+            proposed_execpolicy_amendment = [
+                token for token in amendment_value if isinstance(token, str)
+            ]
+
+        return CommandApprovalRequest(
+            request_id=request_id,
+            thread_id=_require_string_field(params, "threadId", method),
+            turn_id=_require_string_field(params, "turnId", method),
+            item_id=_require_string_field(params, "itemId", method),
+            approval_id=_optional_string(params.get("approvalId")),
+            reason=_optional_string(params.get("reason")),
+            command=_optional_string(params.get("command")),
+            cwd=_optional_string(params.get("cwd")),
+            command_actions=command_actions,
+            proposed_execpolicy_amendment=proposed_execpolicy_amendment,
+        )
+
+    if method == ITEM_FILE_CHANGE_REQUEST_APPROVAL_METHOD:
+        return FileChangeApprovalRequest(
+            request_id=request_id,
+            thread_id=_require_string_field(params, "threadId", method),
+            turn_id=_require_string_field(params, "turnId", method),
+            item_id=_require_string_field(params, "itemId", method),
+            grant_root=_optional_string(params.get("grantRoot")),
+            reason=_optional_string(params.get("reason")),
+        )
+
+    raise CodexProtocolError(f"unsupported server request method: {method}")
+
+
+def _encode_approval_result(
+    request: ApprovalRequest,
+    decision: CommandApprovalDecision | FileChangeApprovalDecision,
+) -> dict[str, Any]:
+    if isinstance(request, CommandApprovalRequest):
+        if isinstance(decision, CommandApprovalWithExecpolicyAmendment):
+            encoded_decision: Any = {
+                "acceptWithExecpolicyAmendment": {
+                    "execpolicy_amendment": list(decision.execpolicy_amendment),
+                }
+            }
+        else:
+            encoded_decision = _encode_simple_approval_decision(decision)
+        return {"decision": encoded_decision}
+
+    if isinstance(decision, CommandApprovalWithExecpolicyAmendment):
+        raise ValueError("execpolicy amendment decision is invalid for file-change approvals")
+
+    return {"decision": _encode_simple_approval_decision(decision)}
+
+
+def _encode_simple_approval_decision(
+    decision: str,
+) -> str:
+    mapping = {
+        "accept": "accept",
+        "accept_for_session": "acceptForSession",
+        "decline": "decline",
+        "cancel": "cancel",
+    }
+    mapped = mapping.get(decision)
+    if mapped is None:
+        raise ValueError(f"unsupported approval decision: {decision!r}")
+    return mapped
+
+
+def _require_string_field(params: Mapping[str, Any], key: str, method: str) -> str:
+    value = params.get(key)
+    if not isinstance(value, str) or not value:
+        raise CodexProtocolError(f"{method} missing required string field: {key}")
+    return value
+
+
+def _optional_string(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _event_mentions_turn_id(payload: Any, turn_id: str) -> bool:

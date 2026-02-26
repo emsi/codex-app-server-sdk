@@ -28,6 +28,8 @@ CONFIG_VALUE_WRITE_METHOD = "config/value/write"
 CONFIG_BATCH_WRITE_METHOD = "config/batchWrite"
 CONFIG_REQUIREMENTS_READ_METHOD = "configRequirements/read"
 ITEM_COMPLETED_METHOD = "item/completed"
+ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL_METHOD = "item/commandExecution/requestApproval"
+ITEM_FILE_CHANGE_REQUEST_APPROVAL_METHOD = "item/fileChange/requestApproval"
 
 DEFAULT_OPT_OUT_NOTIFICATION_METHODS = (
     "codex/event/agent_message_content_delta",
@@ -89,6 +91,18 @@ def make_error_response(
         "jsonrpc": JSONRPC_VERSION,
         "id": request_id,
         "error": error,
+    }
+
+
+def make_result_response(
+    request_id: int | str,
+    result: Any,
+) -> dict[str, Any]:
+    """Build a JSON-RPC success response envelope."""
+    return {
+        "jsonrpc": JSONRPC_VERSION,
+        "id": request_id,
+        "result": result,
     }
 
 

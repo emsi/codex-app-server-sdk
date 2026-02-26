@@ -14,6 +14,7 @@ Task-oriented guides for common usage patterns.
 
 - [Conversation APIs](../conversation.md)
 - [Transports](../transports.md)
+- [Approval requests and sandbox policies](../approvals-and-sandbox.md)
 - [Timeouts, continuation, cancel](../timeouts-continuation-cancel.md)
 - [Threads and configuration](../threads-and-config.md)
 - [Examples](../examples.md)

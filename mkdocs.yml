@@ -42,6 +42,7 @@ nav:
       - Overview: recipes/index.md
       - Conversation APIs: conversation.md
       - Transports: transports.md
+      - Approvals and sandbox: approvals-and-sandbox.md
       - Timeouts, continuation, cancel: timeouts-continuation-cancel.md
       - Threads and configuration: threads-and-config.md
       - Examples: examples.md

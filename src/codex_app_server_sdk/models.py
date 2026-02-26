@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -122,6 +122,65 @@ UNSET = UnsetType()
 #: - ``"never"``: never request approval.
 ApprovalPolicy: TypeAlias = Literal["untrusted", "on-failure", "on-request", "never"]
 
+#: Thread-level sandbox mode accepted by thread/start|resume|fork methods.
+SandboxMode: TypeAlias = Literal["read-only", "workspace-write", "danger-full-access"]
+
+
+class RestrictedReadOnlyAccess(TypedDict, total=False):
+    """Restricted read-only access policy."""
+
+    type: Literal["restricted"]
+    includePlatformDefaults: bool
+    readableRoots: list[str]
+
+
+class FullAccessReadOnlyAccess(TypedDict):
+    """Unrestricted read-only access policy."""
+
+    type: Literal["fullAccess"]
+
+
+ReadOnlyAccess: TypeAlias = RestrictedReadOnlyAccess | FullAccessReadOnlyAccess
+
+
+class DangerFullAccessSandboxPolicy(TypedDict):
+    """No sandbox restrictions."""
+
+    type: Literal["dangerFullAccess"]
+
+
+class ReadOnlySandboxPolicy(TypedDict, total=False):
+    """Read-only sandbox policy."""
+
+    type: Literal["readOnly"]
+    access: ReadOnlyAccess
+
+
+class ExternalSandboxPolicy(TypedDict, total=False):
+    """External sandbox policy with explicit network mode."""
+
+    type: Literal["externalSandbox"]
+    networkAccess: Literal["restricted", "enabled"]
+
+
+class WorkspaceWriteSandboxPolicy(TypedDict, total=False):
+    """Workspace-write sandbox policy."""
+
+    type: Literal["workspaceWrite"]
+    networkAccess: bool
+    readOnlyAccess: ReadOnlyAccess
+    writableRoots: list[str]
+    excludeSlashTmp: bool
+    excludeTmpdirEnvVar: bool
+
+
+SandboxPolicy: TypeAlias = (
+    DangerFullAccessSandboxPolicy
+    | ReadOnlySandboxPolicy
+    | ExternalSandboxPolicy
+    | WorkspaceWriteSandboxPolicy
+)
+
 #: Reasoning effort level for per-turn/model behavior.
 #:
 #: Values are ordered from lowest to highest: ``none``, ``minimal``, ``low``,
@@ -153,7 +212,8 @@ class ThreadConfig:
         model_provider: Optional model provider name/identifier.
         approval_policy: Approval policy mode (`untrusted`, `on-failure`,
             `on-request`, `never`).
-        sandbox: Sandbox mode/policy selector accepted by the server.
+        sandbox: Sandbox mode selector accepted by the server (`read-only`,
+            `workspace-write`, `danger-full-access`).
         personality: Optional personality profile name.
         ephemeral: Optional ephemeral-thread flag.
         config: Optional thread-level config map forwarded to the server.
@@ -165,7 +225,7 @@ class ThreadConfig:
     model: str | None | UnsetType = UNSET
     model_provider: str | None | UnsetType = UNSET
     approval_policy: ApprovalPolicy | None | UnsetType = UNSET
-    sandbox: str | None | UnsetType = UNSET
+    sandbox: SandboxMode | None | UnsetType = UNSET
     personality: str | None | UnsetType = UNSET
     ephemeral: bool | None | UnsetType = UNSET
     config: dict[str, Any] | None | UnsetType = UNSET
@@ -194,7 +254,55 @@ class TurnOverrides:
     model: str | None | UnsetType = UNSET
     effort: ReasoningEffort | None | UnsetType = UNSET
     summary: ReasoningSummary | None | UnsetType = UNSET
-    sandbox_policy: dict[str, Any] | None | UnsetType = UNSET
+    sandbox_policy: SandboxPolicy | dict[str, Any] | None | UnsetType = UNSET
     personality: str | None | UnsetType = UNSET
     approval_policy: ApprovalPolicy | None | UnsetType = UNSET
     output_schema: dict[str, Any] | None | UnsetType = UNSET
+
+
+RequestId: TypeAlias = int | str
+
+
+@dataclass(slots=True)
+class CommandApprovalRequest:
+    """Server-initiated approval request for one command execution item."""
+
+    request_id: RequestId
+    thread_id: str
+    turn_id: str
+    item_id: str
+    approval_id: str | None = None
+    reason: str | None = None
+    command: str | None = None
+    cwd: str | None = None
+    command_actions: list[dict[str, Any]] | None = None
+    proposed_execpolicy_amendment: list[str] | None = None
+
+
+@dataclass(slots=True)
+class FileChangeApprovalRequest:
+    """Server-initiated approval request for one file-change item."""
+
+    request_id: RequestId
+    thread_id: str
+    turn_id: str
+    item_id: str
+    grant_root: str | None = None
+    reason: str | None = None
+
+
+ApprovalRequest: TypeAlias = CommandApprovalRequest | FileChangeApprovalRequest
+
+
+@dataclass(slots=True)
+class CommandApprovalWithExecpolicyAmendment:
+    """Approval decision carrying an execpolicy amendment prefix rule."""
+
+    execpolicy_amendment: list[str]
+
+
+CommandApprovalDecision: TypeAlias = (
+    Literal["accept", "accept_for_session", "decline", "cancel"]
+    | CommandApprovalWithExecpolicyAmendment
+)
+FileChangeApprovalDecision: TypeAlias = Literal["accept", "accept_for_session", "decline", "cancel"]

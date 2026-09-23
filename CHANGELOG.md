@@ -3,6 +3,22 @@
 Version headings identify prepared releases. Publication dates and artifacts
 are recorded in GitHub Releases and PyPI.
 
+## 0.4.1
+
+### Fixed
+
+- Convert the README's relative changelog and release-procedure links to
+  version-tagged GitHub URLs when building the PyPI description. The source
+  README keeps its relative links.
+
+### Compatibility
+
+- Packaging/documentation patch; the SDK API and behavior are unchanged from 0.4.0.
+  The 0.4.0 migration requirements below still apply.
+- Source builds now use `hatch-fancy-pypi-readme` as a build dependency. Isolated
+  builds install it automatically; builds without isolation must provide it.
+  Wheel runtime dependencies are unchanged.
+
 ## 0.4.0
 
 ### Compatibility and required migration

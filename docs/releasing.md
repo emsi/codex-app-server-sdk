@@ -50,6 +50,20 @@ Release tooling requires Twine 7 and packaging 26.3 or newer. Current Hatchling
 produces core metadata 2.5, which the previously locked tools rejected; strict
 artifact validation now detects this incompatibility before upload.
 
+The source README keeps relative links to `CHANGELOG.md` and `RELEASE.md`.
+The `hatch-fancy-pypi-readme` metadata hook converts those links to absolute
+GitHub URLs under the package's version tag when building distributions. This
+keeps links usable on PyPI and tied to the published release. The plugin is a
+build dependency, installed automatically by isolated builds; builds without
+isolation must install the declared build dependencies themselves.
+
+When changing README links, inspect the description in the built wheel's
+`METADATA` and the sdist's `PKG-INFO`, not only the source rendered by GitHub.
+Extend the substitutions in `pyproject.toml` if adding more relative file links.
+PyPI retains the first uploaded metadata for a version, so correcting an
+already-published description requires a new release; repository edits alone
+do not change historical PyPI pages.
+
 ## Prepare and validate locally
 
 Work on a branch based on the default branch (`master`) with complete tag

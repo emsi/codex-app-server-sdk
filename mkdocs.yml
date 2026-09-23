@@ -38,6 +38,7 @@ nav:
   - Home:
       - Overview: index.md
       - Getting started: getting-started.md
+      - Upgrading to 0.4.0: migration-0.4.0.md
       - Releasing: releasing.md
   - Recipes:
       - Overview: recipes/index.md

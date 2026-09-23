@@ -13,6 +13,13 @@ Two high-level conversation entrypoints are provided:
 - [`chat_once(...)`](api/client.md#codex_app_server_sdk.client.CodexClient.chat_once): one message in, final assistant text out
 - [`chat(...)`](api/client.md#codex_app_server_sdk.client.CodexClient.chat): async iterator of completed, non-delta step blocks
 
+!!! warning "0.4.0: failed and interrupted turns raise"
+
+    Both APIs now raise `CodexProtocolError` for failed/interrupted terminal
+    statuses, even after partial assistant output. Handle errors around the
+    whole call or iteration; a yielded step does not establish success.
+    See [migration details](migration-0.4.0.md#failed-and-interrupted-conversations-now-raise).
+
 ## `chat_once(...)`
 
 Use when you only need final text.

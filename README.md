@@ -6,6 +6,13 @@ It gives you a convenient conversation API over `stdio` or `websocket` without h
 
 Documentation: https://emsi.github.io/codex-app-server-sdk/
 
+> **Upgrading to 0.4.0? Behavior changes require review.** Read the
+> [0.3.2 → 0.4.0 migration guide](https://emsi.github.io/codex-app-server-sdk/migration-0.4.0/)
+> before upgrading.
+> Stream-based approval responders must set `approval_mode="manual"`.
+> Failed/interrupted turns now raise; cancellation, initialization, unanswered
+> user questions, and custom transport expectations also change.
+
 ## Highlights
 
 - simple one-shot turns with `chat_once(...)`
@@ -80,6 +87,7 @@ uv pip install codex-app-server-sdk
 - PyPI: https://pypi.org/project/codex-app-server-sdk/
 - Human-in-the-loop guide: https://emsi.github.io/codex-app-server-sdk/human-in-the-loop/
 - Release procedure: [RELEASE.md](RELEASE.md)
+- Upgrading from 0.3.2: [0.4.0 migration guide](https://emsi.github.io/codex-app-server-sdk/migration-0.4.0/)
 - Release notes and migration guidance: [CHANGELOG.md](CHANGELOG.md)
 
 ## Quick start

@@ -1,5 +1,12 @@
 # Human-in-the-loop: plan mode and user questions
 
+!!! warning "0.4.0 changes unanswered-question behavior"
+
+    Previously unsupported user-input requests failed immediately. They now
+    wait up to 300 seconds by default, which exceeds the default 180-second
+    conversation inactivity timeout. Unattended clients should choose an
+    explicit input policy. See [the migration guide](migration-0.4.0.md#unanswered-user-questions-now-wait-by-default).
+
 ## Related API
 
 - [`TurnOverrides`](api/models.md#codex_app_server_sdk.models.TurnOverrides)
@@ -97,8 +104,17 @@ async with CodexClient.connect_stdio(user_input_response_timeout=None) as client
 
 ## Notes
 
-- If `set_user_input_handler(...)` is not configured, unanswered requests fail after `user_input_response_timeout`.
-- Set `user_input_response_timeout=None` for fully manual workflows that answer via `user_input_requests()`.
+- If `set_user_input_handler(...)` is not configured, unanswered requests receive
+  error `-32000` after `user_input_response_timeout` (default: 300 seconds).
+  This timeout does not limit callback execution time.
+- For unattended operation, `user_input_response_timeout=0.0` sends a prompt
+  error when there is no callback. It does not itself cancel the turn or restore
+  the old unsupported-method error `-32601`.
+- Set `user_input_response_timeout=None` for fully manual workflows with an
+  active `user_input_requests()` response loop.
+- Conversation inactivity is independent: handle `CodexTurnInactiveError` and
+  retain its continuation, or configure the client's inactivity timeout for
+  long human waits. `approval_mode` only controls approval handling.
 
 ## Handling approvals and user-input together
 

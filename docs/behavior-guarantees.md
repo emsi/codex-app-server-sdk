@@ -2,6 +2,10 @@
 
 This page records intended high-level behavior for consumers.
 
+**Upgrading from 0.3.2:** several guarantees changed in 0.4.0. Read the
+[migration guide](migration-0.4.0.md) for previous behavior and required
+application changes.
+
 ## Related API
 
 - [`CodexClient.chat(...)`](api/client.md#codex_app_server_sdk.client.CodexClient.chat)

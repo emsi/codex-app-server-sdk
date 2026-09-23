@@ -5,6 +5,55 @@ are recorded in GitHub Releases and PyPI.
 
 ## 0.4.0
 
+### Compatibility and required migration
+
+**This release is not a drop-in behavior-compatible upgrade from 0.3.2.**
+Read the [complete migration guide](https://emsi.github.io/codex-app-server-sdk/migration-0.4.0/)
+before deploying an existing application. Existing public methods and imports
+remain available, but callers may need the following changes:
+
+- **Manual approvals:** set `approval_mode="manual"` when responding through
+  `approval_requests()` without a callback. Previously, these responses raced
+  automatic decline. The default still declines without a handler; a callback
+  handles requests in either mode. Consuming the stream does not select manual
+  mode. Late, duplicate, server-resolved, or mismatched approval responses now
+  fail stricter pending-request checks.
+- **Unsuccessful turns:** both conversation APIs raise `CodexProtocolError`
+  for failed/interrupted terminal statuses, even after partial output. A stream
+  can yield steps before raising; partial assistant text is not proof of success.
+- **Cancellation errors and ownership:** `cancel()` propagates interrupt RPC,
+  request-timeout, and transport failures. Missing terminal confirmation raises
+  `CodexTurnInactiveError` with the original continuation and cursor. It rejects
+  tokens for turns no longer retained by the same client, including repeated
+  cancellation after cleanup. Retain tokens on errors, but do not assume a
+  failed transport remains usable.
+- **Cancellation results:** `was_interrupted` requires confirmed interruption;
+  `was_completed` means successful completion. Both can be false for a failed
+  terminal turn. An interrupt acknowledgement alone is not confirmation.
+- **Low-level interruption:** pass `thread_id` to `interrupt_turn()` for turns
+  the SDK does not track. Missing or conflicting thread IDs raise `ValueError`.
+- **Initialization:** the first successful call is cached. Later `initialize()`
+  calls return the same result and ignore new parameters/timeouts. Supply custom
+  settings before implicit initialization. Custom servers and tests must accept
+  the new `initialized` notification and the installed SDK version in default
+  `clientInfo.version`, replacing the hardcoded `0.1.0`.
+- **Unanswered user questions:** `item/tool/requestUserInput` now waits up to
+  300 seconds without a callback or manual response, instead of immediately
+  returning unsupported-method error `-32601`. The default 180-second turn
+  inactivity timeout can fire first. Unattended clients can set
+  `user_input_response_timeout=0.0` for a prompt error response (`-32000`, not
+  the old code); manual UIs may use `None` with an active response loop.
+- **Events and transports:** routing uses explicit turn/thread identifiers,
+  not arbitrary nested content. Ambiguous terminal events no longer complete
+  arbitrary turns. Raw event counts/timing can change; all waiting consumers
+  now receive connection failures. Custom transports and fixtures may need
+  updated envelopes and handshake expectations.
+- **Installation and model shape:** package imports require installed
+  distribution metadata; use `uv sync` or an editable/wheel install rather
+  than copying source alone. `TurnOverrides` adds a field, affecting fixed
+  dataclass snapshots and tuple unpacking. Python and runtime dependency
+  requirements are unchanged.
+
 ### Added
 
 - Collaboration mode configuration (`default` and `plan`) through turn overrides.
@@ -29,18 +78,8 @@ are recorded in GitHub Releases and PyPI.
   retains continuations on errors or timeouts and cleans up after confirmation.
 - Approval responses reject duplicate or already-resolved requests.
 - Update release tooling to validate current Hatchling's core metadata 2.5.
-
-### Migration notes
-
-- Set `approval_mode="manual"` when responding through `approval_requests()`
-  without a callback. The default still declines requests without a handler.
-- Catch `CodexProtocolError` for failed or interrupted turns; they no longer
-  appear to succeed with partial output.
-- `cancel()` can now raise an RPC error or `CodexTurnInactiveError`. Retain the
-  continuation for another wait or cancellation attempt.
-- `CancelResult.was_interrupted` means confirmed interruption, and
-  `was_completed` means observed successful completion.
-- Pass `thread_id` to `interrupt_turn()` for turns the SDK is not tracking.
+- Make basedpyright warnings non-fatal consistently in local and GitHub
+  Actions checks; type errors remain a release gate.
 
 ### Validation
 

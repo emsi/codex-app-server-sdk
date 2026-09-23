@@ -65,6 +65,10 @@ The version is already prepared as 0.4.0 in this change. For later releases,
 use the selected version or `uv version --bump minor` / `uv version --bump patch`.
 This updates both the project metadata and lockfile. Add or update the matching
 changelog section, including migration instructions for changed behavior.
+Put compatibility notices first in that section so they appear prominently in
+the generated GitHub Release. For behavior changes, maintain a migration guide
+(such as [the 0.4.0 guide](migration-0.4.0.md)) and link it from the README,
+documentation home/navigation, affected usage guides, and PR description.
 
 Run the checks below. `v0.3.2` is the previous release for 0.4.0; for subsequent
 releases use the previous reachable release tag. Quality checks run in parallel

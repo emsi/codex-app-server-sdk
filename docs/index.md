@@ -2,6 +2,14 @@
 
 Async Python client library for `codex app-server` over `stdio` and `websocket`.
 
+!!! warning "Upgrading to 0.4.0 requires a compatibility review"
+
+    This release changes behavior for existing applications. Stream-based
+    approval responders must set `approval_mode="manual"`; failed/interrupted
+    turns now raise, and cancellation, initialization, unanswered user questions,
+    and custom transport expectations also change.
+    Read the [0.3.2 → 0.4.0 migration guide](migration-0.4.0.md).
+
 ## Why use this client?
 
 Use Codex directly from your application's `asyncio` event loop, choose or
@@ -41,6 +49,7 @@ This documentation is organized around:
 ## Quick links
 
 - Start here: [Getting started](getting-started.md)
+- Upgrade an existing app: [Migrating to 0.4.0](migration-0.4.0.md)
 - Streaming semantics: [Conversation APIs](conversation.md)
 - Plan mode and user confirmation: [Human-in-the-loop](human-in-the-loop.md)
 - Long-running turn control: [Timeouts, continuation, cancel](timeouts-continuation-cancel.md)

@@ -68,3 +68,7 @@ packages = ["src/codex_app_server_sdk"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+[tool.basedpyright]
+# --level filters output; explicitly keep warnings non-fatal in GitHub Actions too.
+failOnWarnings = false

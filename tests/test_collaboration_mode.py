@@ -111,7 +111,9 @@ def test_chat_once_forwards_collaboration_mode_from_turn_overrides() -> None:
             await client.close()
 
         turn_start_messages = [
-            message for message in transport.sent if message.get("method") == "turn/start"
+            message
+            for message in transport.sent
+            if message.get("method") == "turn/start"
         ]
         assert turn_start_messages, "turn/start was not sent"
         params = turn_start_messages[-1].get("params")

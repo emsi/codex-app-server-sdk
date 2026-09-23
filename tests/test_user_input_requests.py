@@ -96,6 +96,7 @@ def test_user_input_request_uses_callback_handler() -> None:
         transport = UserInputTransport()
         client = await CodexClient(transport, request_timeout=1.0).start()
         try:
+
             async def _handler(req: UserInputRequest) -> UserInputResponse:
                 assert req.thread_id == "thread-2"
                 return UserInputResponse(
@@ -178,7 +179,9 @@ def test_user_input_manual_stream_response() -> None:
                 }
             )
 
-            req = await asyncio.wait_for(anext(client.user_input_requests()), timeout=1.0)
+            req = await asyncio.wait_for(
+                anext(client.user_input_requests()), timeout=1.0
+            )
             assert isinstance(req, UserInputRequest)
             await client.respond_user_input_choice(
                 req,

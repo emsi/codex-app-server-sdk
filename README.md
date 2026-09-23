@@ -79,6 +79,8 @@ uv pip install codex-app-server-sdk
 - Docs site: https://emsi.github.io/codex-app-server-sdk/
 - PyPI: https://pypi.org/project/codex-app-server-sdk/
 - Human-in-the-loop guide: https://emsi.github.io/codex-app-server-sdk/human-in-the-loop/
+- Release procedure: [RELEASE.md](RELEASE.md)
+- Release notes and migration guidance: [CHANGELOG.md](CHANGELOG.md)
 
 ## Quick start
 

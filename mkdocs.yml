@@ -38,6 +38,7 @@ nav:
   - Home:
       - Overview: index.md
       - Getting started: getting-started.md
+      - Releasing: releasing.md
   - Recipes:
       - Overview: recipes/index.md
       - Conversation APIs: conversation.md

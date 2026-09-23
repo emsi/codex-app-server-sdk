@@ -13,6 +13,10 @@ are recorded in GitHub Releases and PyPI.
   decisions from a person or UI.
 - Public `__version__`, read from installed package metadata and used in the
   app-server initialization handshake.
+- Release validation shared with PR CI: Python 3.12–3.14 tests, changed-file
+  quality checks, package checks, and an isolated wheel import.
+- Automated GitHub Releases with changelog notes and the same artifacts as
+  PyPI, with version/tag checks and recovery for interrupted uploads.
 
 ### Fixed
 
@@ -24,6 +28,7 @@ are recorded in GitHub Releases and PyPI.
 - Interrupt requests include both thread and turn identifiers. Cancellation
   retains continuations on errors or timeouts and cleans up after confirmation.
 - Approval responses reject duplicate or already-resolved requests.
+- Update release tooling to validate current Hatchling's core metadata 2.5.
 
 ### Migration notes
 

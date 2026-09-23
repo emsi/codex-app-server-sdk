@@ -71,6 +71,9 @@ uv pip install codex-app-server-sdk
 
 ## Contributor docs workflow
 
+For versioning, package validation, and publishing, see the
+[release procedure](releasing.md).
+
 Install development dependencies:
 
 ```bash

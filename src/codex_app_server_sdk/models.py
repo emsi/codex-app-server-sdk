@@ -90,8 +90,8 @@ class CancelResult(BaseModel):
         turn_id: Turn id that was cancelled.
         steps: Unread completed step objects accumulated since continuation cursor.
         raw_events: Unread raw events accumulated since continuation cursor.
-        was_completed: True if the turn was already completed when cancelling.
-        was_interrupted: True if an interrupt request was sent.
+        was_completed: True if successful turn completion was observed.
+        was_interrupted: True if the server confirmed an interrupted turn.
     """
 
     thread_id: str
@@ -124,6 +124,9 @@ ApprovalPolicy: TypeAlias = Literal["untrusted", "on-failure", "on-request", "ne
 
 #: Thread-level sandbox mode accepted by thread/start|resume|fork methods.
 SandboxMode: TypeAlias = Literal["read-only", "workspace-write", "danger-full-access"]
+
+#: Collaboration mode for turn execution.
+ModeKind: TypeAlias = Literal["plan", "default"]
 
 
 class RestrictedReadOnlyAccess(TypedDict, total=False):
@@ -185,7 +188,9 @@ SandboxPolicy: TypeAlias = (
 #:
 #: Values are ordered from lowest to highest: ``none``, ``minimal``, ``low``,
 #: ``medium``, ``high``, ``xhigh``.
-ReasoningEffort: TypeAlias = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+ReasoningEffort: TypeAlias = Literal[
+    "none", "minimal", "low", "medium", "high", "xhigh"
+]
 
 #: Reasoning summary verbosity preference.
 #:
@@ -248,6 +253,8 @@ class TurnOverrides:
         personality: Per-turn personality override.
         approval_policy: Per-turn approval policy override.
         output_schema: Optional structured-output schema override.
+        collaboration_mode: Optional collaboration mode configuration for
+            this turn and subsequent turns.
     """
 
     cwd: str | None | UnsetType = UNSET
@@ -258,6 +265,24 @@ class TurnOverrides:
     personality: str | None | UnsetType = UNSET
     approval_policy: ApprovalPolicy | None | UnsetType = UNSET
     output_schema: dict[str, Any] | None | UnsetType = UNSET
+    collaboration_mode: CollaborationMode | dict[str, Any] | None | UnsetType = UNSET
+
+
+@dataclass(slots=True)
+class CollaborationSettings:
+    """Settings associated with a collaboration mode."""
+
+    model: str
+    reasoning_effort: ReasoningEffort | None = None
+    developer_instructions: str | None = None
+
+
+@dataclass(slots=True)
+class CollaborationMode:
+    """Turn collaboration mode and settings."""
+
+    mode: ModeKind
+    settings: CollaborationSettings
 
 
 RequestId: TypeAlias = int | str
@@ -295,6 +320,51 @@ ApprovalRequest: TypeAlias = CommandApprovalRequest | FileChangeApprovalRequest
 
 
 @dataclass(slots=True)
+class UserInputOption:
+    """One selectable option for a user-input question."""
+
+    label: str
+    description: str
+
+
+@dataclass(slots=True)
+class UserInputQuestion:
+    """Question descriptor sent by `item/tool/requestUserInput`."""
+
+    id: str
+    header: str
+    question: str
+    is_other: bool
+    is_secret: bool
+    options: list[UserInputOption] | None = None
+
+
+@dataclass(slots=True)
+class UserInputRequest:
+    """Server-initiated human-input request."""
+
+    request_id: RequestId
+    thread_id: str
+    turn_id: str
+    item_id: str
+    questions: list[UserInputQuestion]
+
+
+@dataclass(slots=True)
+class UserInputAnswer:
+    """Answer payload for one question id."""
+
+    answers: list[str]
+
+
+@dataclass(slots=True)
+class UserInputResponse:
+    """Response payload for `item/tool/requestUserInput`."""
+
+    answers: dict[str, UserInputAnswer]
+
+
+@dataclass(slots=True)
 class CommandApprovalWithExecpolicyAmendment:
     """Approval decision carrying an execpolicy amendment prefix rule."""
 
@@ -305,4 +375,6 @@ CommandApprovalDecision: TypeAlias = (
     Literal["accept", "accept_for_session", "decline", "cancel"]
     | CommandApprovalWithExecpolicyAmendment
 )
-FileChangeApprovalDecision: TypeAlias = Literal["accept", "accept_for_session", "decline", "cancel"]
+FileChangeApprovalDecision: TypeAlias = Literal[
+    "accept", "accept_for_session", "decline", "cancel"
+]

@@ -6,6 +6,13 @@ It gives you a convenient conversation API over `stdio` or `websocket` without h
 
 Documentation: https://emsi.github.io/codex-app-server-sdk/
 
+> **Upgrading to 0.4.0? Behavior changes require review.** Read the
+> [0.3.2 → 0.4.0 migration guide](https://emsi.github.io/codex-app-server-sdk/migration-0.4.0/)
+> before upgrading.
+> Stream-based approval responders must set `approval_mode="manual"`.
+> Failed/interrupted turns now raise; cancellation, initialization, unanswered
+> user questions, and custom transport expectations also change.
+
 ## Highlights
 
 - simple one-shot turns with `chat_once(...)`
@@ -14,7 +21,45 @@ Documentation: https://emsi.github.io/codex-app-server-sdk/
 - thread-scoped config + forking via `ThreadHandle`
 - inactivity timeout continuation for long-running turns
 - turn cancellation with unread-step/event drain via `cancel(...)`
+- collaboration mode overrides (`default`/`plan`) via `TurnOverrides`
+- human-in-the-loop user input handling (`item/tool/requestUserInput`)
 - optional low-level `request(...)` access when needed
+
+## Why use this client?
+
+Protocol I/O and callbacks run directly on your application's `asyncio` event
+loop, using asynchronous subprocess pipes or WebSockets. Thread handles share
+one connection, and approvals can integrate with an async callback or a manual
+UI response loop.
+
+You control the Codex runtime: launch your chosen executable or connect to an
+existing WebSocket server. The conversation API adds completed-step streaming,
+resumable inactivity timeouts, and cancellation with unread-event recovery.
+The `Transport` interface and raw `request(...)` method remain available for
+application-specific integrations.
+
+### Compared with `openai-codex`
+
+Both libraries use the Codex app-server protocol. Their integration choices differ:
+
+| Area | `codex-app-server-sdk` | `openai-codex` |
+| --- | --- | --- |
+| Execution | Native `asyncio` client; asynchronous protocol I/O on your event loop | Synchronous client with an async wrapper that offloads blocking operations to background threads |
+| Transport | Public, replaceable `Transport`; built-in stdio and WebSocket support | SDK-managed subprocess communicating through line-delimited JSON over stdio |
+| Protocol access | Flexible dictionary-based RPC via `request(...)`, plus high-level conversation models | Extensive generated types, typed responses, and typed notifications |
+| Runtime management | You supply and manage Codex; choose an executable or connect to an existing WebSocket server | Installs an exactly pinned Codex runtime dependency by default |
+
+This client fits applications that need native async I/O, custom transports,
+connections to an existing server, or independent control over runtime upgrades.
+The official SDK offers broader generated type coverage and a reproducible
+runtime default. You are responsible for installing and updating Codex when
+using this client.
+
+Comparison verified against the published
+[`openai-codex` 0.156.1](https://pypi.org/project/openai-codex/0.156.1/)
+source and package metadata on 2026-09-23. The official SDK also supports a
+[`CodexConfig(codex_bin=...)` override](https://learn.chatgpt.com/docs/codex-sdk)
+for selecting a different local executable.
 
 ## Install
 
@@ -40,6 +85,10 @@ uv pip install codex-app-server-sdk
 
 - Docs site: https://emsi.github.io/codex-app-server-sdk/
 - PyPI: https://pypi.org/project/codex-app-server-sdk/
+- Human-in-the-loop guide: https://emsi.github.io/codex-app-server-sdk/human-in-the-loop/
+- Release procedure: [RELEASE.md](RELEASE.md)
+- Upgrading from 0.3.2: [0.4.0 migration guide](https://emsi.github.io/codex-app-server-sdk/migration-0.4.0/)
+- Release notes and migration guidance: [CHANGELOG.md](CHANGELOG.md)
 
 ## Quick start
 
@@ -395,13 +444,13 @@ uv run python examples/chat_session_websocket.py
 - `compact_thread(thread_id)`: request context compaction.
 - `chat(...)` (`text=None, thread_id=None, user=None, metadata=None, thread_config=None, turn_overrides=None, inactivity_timeout=None, continuation=None`): async iterator yielding completed non-delta step blocks.
 - `chat_once(...)` (`text=None, thread_id=None, user=None, metadata=None, thread_config=None, turn_overrides=None, inactivity_timeout=None, continuation=None`): send one user message and wait for completed turn.
-- `cancel(continuation, timeout=None)`: interrupt running turn, return unread steps/events, and clean turn state.
+- `cancel(continuation, timeout=None)`: interrupt a turn and return unread steps/events after terminal confirmation; retain the continuation if cancellation fails or times out.
 - `steer_turn(thread_id=..., expected_turn_id=..., input_items=...)`: steer active turn input.
 - `start_review(thread_id=..., target=..., delivery=None)`: run review mode.
 - `list_models(...)`: discover available models.
 - `exec_command(command, ...)`: run one command via server command API.
 - `read_config(...)`, `read_config_requirements()`, `write_config_value(...)`, `batch_write_config(...)`: config APIs.
-- `interrupt_turn(turn_id, timeout=None)`: low-level turn interruption request.
+- `interrupt_turn(turn_id, thread_id=None, timeout=None)`: low-level interruption request; infer the thread for tracked turns or pass it explicitly.
 - `close()`: cancel receive loop and close transport.
 
 ### `Transport` and implementations (`src/codex_app_server_sdk/transport.py`)
@@ -450,7 +499,9 @@ uv run python examples/chat_session_websocket.py
 - `chat_once(...)` resolves final text from completed `agentMessage` items (`item/completed`), with `thread/read(includeTurns=true)` fallback.
 - `turn_timeout` is intentionally removed to avoid conflicting timeout semantics.
 - Turn waits are controlled by `inactivity_timeout` (or unbounded when `None`).
-- `cancel(...)` interrupts a continuation turn, returns unread buffered data, and cleans internal session state so the same thread can be reused safely.
+- `cancel(...)` releases turn state only after a terminal event. RPC failures propagate; a confirmation timeout raises `CodexTurnInactiveError` with the original continuation.
+- Failed or interrupted turns raise `CodexProtocolError` from both chat APIs, even if partial assistant text was received.
+- Use `approval_mode="manual"` on either connection factory to answer `approval_requests()` yourself. Without a callback, the default `"auto"` mode declines requests.
 - Advanced thread-level config/fork uses protocol v2 methods (`thread/start`, `thread/resume`, `thread/fork`) exposed via `ThreadHandle` and `ThreadConfig`.
 - `metadata` is applied on `turn/start` payloads for message turns; thread-level config uses schema-aligned fields on thread methods.
 - preferred lifecycle is `async with CodexClient.connect_*() as client:`; manual `start()/close()` remains available for advanced control.
@@ -469,14 +520,16 @@ uv run python examples/chat_session_websocket.py
 
 ### Default initialize payload
 
-When `params=None`, the client sends:
+When `params=None`, the client sends the following payload. The version
+placeholder is replaced with the installed package version, also available as
+`codex_app_server_sdk.__version__`:
 
 ```json
 {
   "protocolVersion": "1",
   "clientInfo": {
     "name": "codex-app-server-sdk",
-    "version": "0.1.0"
+    "version": "<installed SDK version>"
   },
   "capabilities": {
     "optOutNotificationMethods": [
@@ -517,6 +570,9 @@ Merge rules:
 - `raw`: full raw initialize result payload
 
 ### Example: explicit initialize
+
+The custom `clientInfo.version` below identifies your application, independently
+of the SDK version.
 
 ```python
 import asyncio

@@ -1,3 +1,4 @@
+from ._version import __version__
 from .client import CodexClient, ThreadHandle
 from .errors import (
     CodexError,
@@ -12,6 +13,8 @@ from .models import (
     CancelResult,
     ChatContinuation,
     ChatResult,
+    CollaborationMode,
+    CollaborationSettings,
     CommandApprovalDecision,
     CommandApprovalRequest,
     CommandApprovalWithExecpolicyAmendment,
@@ -19,6 +22,7 @@ from .models import (
     FileChangeApprovalDecision,
     FileChangeApprovalRequest,
     InitializeResult,
+    ModeKind,
     SandboxMode,
     SandboxPolicy,
     ReasoningEffort,
@@ -26,14 +30,22 @@ from .models import (
     ThreadConfig,
     TurnOverrides,
     UNSET,
+    UserInputAnswer,
+    UserInputOption,
+    UserInputQuestion,
+    UserInputRequest,
+    UserInputResponse,
 )
 
 __all__ = [
+    "__version__",
     "CancelResult",
     "ApprovalRequest",
     "ApprovalPolicy",
     "ChatContinuation",
     "ChatResult",
+    "CollaborationMode",
+    "CollaborationSettings",
     "CommandApprovalDecision",
     "CommandApprovalRequest",
     "CommandApprovalWithExecpolicyAmendment",
@@ -47,6 +59,7 @@ __all__ = [
     "FileChangeApprovalDecision",
     "FileChangeApprovalRequest",
     "InitializeResult",
+    "ModeKind",
     "SandboxMode",
     "SandboxPolicy",
     "ReasoningEffort",
@@ -55,4 +68,9 @@ __all__ = [
     "ThreadHandle",
     "TurnOverrides",
     "UNSET",
+    "UserInputAnswer",
+    "UserInputOption",
+    "UserInputQuestion",
+    "UserInputRequest",
+    "UserInputResponse",
 ]

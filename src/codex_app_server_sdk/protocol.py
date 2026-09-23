@@ -30,6 +30,7 @@ CONFIG_REQUIREMENTS_READ_METHOD = "configRequirements/read"
 ITEM_COMPLETED_METHOD = "item/completed"
 ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL_METHOD = "item/commandExecution/requestApproval"
 ITEM_FILE_CHANGE_REQUEST_APPROVAL_METHOD = "item/fileChange/requestApproval"
+ITEM_TOOL_REQUEST_USER_INPUT_METHOD = "item/tool/requestUserInput"
 
 DEFAULT_OPT_OUT_NOTIFICATION_METHODS = (
     "codex/event/agent_message_content_delta",

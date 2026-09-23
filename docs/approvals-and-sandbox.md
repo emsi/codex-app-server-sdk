@@ -1,12 +1,20 @@
 # Approval requests and sandbox policies
 
+!!! warning "0.4.0 migration: manual response streams must opt in"
+
+    Set `approval_mode="manual"` when responding to `approval_requests()`
+    without a callback. The default still automatically declines; reading the
+    stream does not change that. Callback users keep their existing setup.
+    See [the migration guide](migration-0.4.0.md#manual-approvals-explicitly-select-the-response-mode),
+    including stricter checks for late or duplicate responses.
+
 ## Related API
 
 - [`ThreadConfig`](api/models.md#codex_app_server_sdk.models.ThreadConfig)
 - [`TurnOverrides`](api/models.md#codex_app_server_sdk.models.TurnOverrides)
-- [`SandboxMode`](api/models.md#codex_app_server_sdk.models.SandboxMode)
-- [`SandboxPolicy`](api/models.md#codex_app_server_sdk.models.SandboxPolicy)
-- [`ApprovalPolicy`](api/models.md#codex_app_server_sdk.models.ApprovalPolicy)
+- [`SandboxMode`](#thread-level-policy-and-sandbox-mode)
+- [`SandboxPolicy`](#turn-level-sandbox-policy)
+- [`ApprovalPolicy`](#thread-level-policy-and-sandbox-mode)
 - [`CodexClient.set_approval_handler(...)`](api/client.md#codex_app_server_sdk.client.CodexClient.set_approval_handler)
 - [`CodexClient.approval_requests(...)`](api/client.md#codex_app_server_sdk.client.CodexClient.approval_requests)
 - [`CodexClient.respond_approval(...)`](api/client.md#codex_app_server_sdk.client.CodexClient.respond_approval)
@@ -69,7 +77,9 @@ The client handles v2 server-initiated approval requests:
 - `item/commandExecution/requestApproval`
 - `item/fileChange/requestApproval`
 
-If no handler is registered, the SDK auto-responds with `decline` (continue turn).
+In the default `approval_mode="auto"`, no handler means the SDK responds with
+`decline` (continue turn). With `approval_mode="manual"` and no handler, the
+request remains pending for an explicit response.
 
 ### Callback mode
 
@@ -102,13 +112,17 @@ async with CodexClient.connect_stdio() as client:
 
 ### Stream mode (manual response)
 
+Set `approval_mode="manual"` before starting the turn. Without a callback,
+requests then remain pending until you answer them or the server resolves them.
+The default `approval_mode="auto"` still declines requests without a callback.
+
 ```python
 import asyncio
 from contextlib import suppress
 from codex_app_server_sdk import CodexClient, CommandApprovalRequest
 
 
-async with CodexClient.connect_stdio() as client:
+async with CodexClient.connect_stdio(approval_mode="manual") as client:
     async def approval_loop():
         async for req in client.approval_requests():
             if isinstance(req, CommandApprovalRequest):
@@ -126,4 +140,10 @@ async with CodexClient.connect_stdio() as client:
             await approval_task
 ```
 
-`approval_requests()` is observational. If a callback is configured, callback handling remains authoritative.
+If a callback is configured, it handles requests in either mode and
+`approval_requests()` is observational. Choose one response mechanism per
+request. Long human waits still follow the client's inactivity timeout;
+disable that timeout or retain and resume the continuation when needed.
+
+For plan-mode user questions (`item/tool/requestUserInput`), see
+[Human-in-the-loop](human-in-the-loop.md).

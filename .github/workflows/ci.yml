@@ -1,0 +1,100 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+  workflow_call:
+    inputs:
+      base_ref:
+        description: Previous release tag for changed-file quality checks
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CODEX_SDK_LIVE_TESTS: "0"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.11.18"
+      - run: uv sync --locked --group dev
+      - run: uv run --locked python -m pytest -q
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.11.18"
+      - run: uv sync --locked --group dev
+      - name: Check changed Python files in parallel
+        env:
+          BASE_REF: ${{ inputs.base_ref || github.event.pull_request.base.sha || github.event.before }}
+        run: uv run --locked python scripts/check_quality.py --base "$BASE_REF"
+
+  package:
+    needs: [test, quality]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.11.18"
+      - run: uv sync --locked --group dev
+      - name: Check documentation
+        run: |
+          uv run --locked python scripts/check_chat_method_links.py
+          uv run --locked zensical build
+      - name: Build and validate distributions
+        run: |
+          uv build --no-sources
+          uv run --locked twine check --strict dist/*
+          uv run --locked python scripts/check_release.py --dist-dir dist
+      - name: Smoke test the installed wheel outside the source environment
+        run: |
+          export EXPECTED_VERSION
+          EXPECTED_VERSION=$(uv version --short)
+          wheels=(dist/*.whl)
+          uv run --isolated --no-project --with "${wheels[0]}" python -I - <<'PY'
+          import os
+          from importlib.metadata import version
+          from importlib.resources import files
+          from codex_app_server_sdk import CodexClient, __version__
+
+          assert __version__ == version("codex-app-server-sdk") == os.environ["EXPECTED_VERSION"]
+          assert files("codex_app_server_sdk").joinpath("py.typed").is_file()
+          assert callable(CodexClient.connect_stdio)
+          PY
+      - name: Reject conflicting artifacts already on PyPI
+        if: startsWith(github.ref, 'refs/tags/')
+        run: uv run --locked python scripts/check_release.py --dist-dir dist --check-pypi
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error

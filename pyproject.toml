@@ -1,6 +1,6 @@
 [project]
 name = "codex-app-server-sdk"
-version = "0.3.2"
+version = "0.4.0"
 description = "Async Python client for Codex app-server over stdio and websocket."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -23,6 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Typing :: Typed",
 ]
 dependencies = [
@@ -44,7 +45,7 @@ dev = [
     "zensical>=0.0.23",
     "mkdocstrings-python>=1.18.2",
     "pytest>=8.2.0",
-    "twine>=6.0.1",
+    "twine>=7.0.0",
 ]
 
 [dependency-groups]
@@ -57,8 +58,17 @@ dev = [
     "mypy>=1.19.1",
     "pytest>=9.0.2",
     "ruff>=0.15.2",
-    "twine>=6.0.1",
+    "twine>=7.0.0",
+    "typer>=0.15",
+    "packaging>=26.3",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/codex_app_server_sdk"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.basedpyright]
+# --level filters output; explicitly keep warnings non-fatal in GitHub Actions too.
+failOnWarnings = false

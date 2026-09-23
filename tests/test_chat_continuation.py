@@ -230,6 +230,7 @@ class CancelTransport(Transport):
             return
 
         if method == "turn/interrupt":
+            assert message["params"] == {"threadId": "thread-1", "turnId": "turn-1"}
             await self._incoming.put({"jsonrpc": "2.0", "id": request_id, "result": {}})
             await self._incoming.put(
                 {
@@ -265,7 +266,14 @@ class CancelTransport(Transport):
                 {
                     "jsonrpc": "2.0",
                     "method": "turn/completed",
-                    "params": {"threadId": "thread-1", "turnId": "turn-1"},
+                    "params": {
+                        "threadId": "thread-1",
+                        "turn": {
+                            "id": "turn-1",
+                            "status": "interrupted",
+                            "error": None,
+                        },
+                    },
                 }
             )
             return
@@ -410,7 +418,10 @@ def test_chat_once_continuation_rejects_conflicting_args() -> None:
             assert continuation is not None
 
             cases: list[tuple[dict[str, Any], str]] = [
-                ({"thread_id": "thread-x"}, "thread_id cannot be used with continuation"),
+                (
+                    {"thread_id": "thread-x"},
+                    "thread_id cannot be used with continuation",
+                ),
                 ({"user": "alice"}, "user cannot be used with continuation"),
                 (
                     {"metadata": {"source": "test"}},
@@ -455,7 +466,10 @@ def test_chat_stream_continuation_rejects_conflicting_args() -> None:
                     pass
 
             cases: list[tuple[dict[str, Any], str]] = [
-                ({"thread_id": "thread-x"}, "thread_id cannot be used with continuation"),
+                (
+                    {"thread_id": "thread-x"},
+                    "thread_id cannot be used with continuation",
+                ),
                 ({"user": "alice"}, "user cannot be used with continuation"),
                 (
                     {"metadata": {"source": "test"}},

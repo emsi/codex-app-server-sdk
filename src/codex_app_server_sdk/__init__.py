@@ -1,3 +1,4 @@
+from ._version import __version__
 from .client import CodexClient, ThreadHandle
 from .errors import (
     CodexError,
@@ -37,6 +38,7 @@ from .models import (
 )
 
 __all__ = [
+    "__version__",
     "CancelResult",
     "ApprovalRequest",
     "ApprovalPolicy",

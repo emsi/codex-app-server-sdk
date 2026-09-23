@@ -510,14 +510,16 @@ uv run python examples/chat_session_websocket.py
 
 ### Default initialize payload
 
-When `params=None`, the client sends:
+When `params=None`, the client sends the following payload. The version
+placeholder is replaced with the installed package version, also available as
+`codex_app_server_sdk.__version__`:
 
 ```json
 {
   "protocolVersion": "1",
   "clientInfo": {
     "name": "codex-app-server-sdk",
-    "version": "0.1.0"
+    "version": "<installed SDK version>"
   },
   "capabilities": {
     "optOutNotificationMethods": [
@@ -558,6 +560,9 @@ Merge rules:
 - `raw`: full raw initialize result payload
 
 ### Example: explicit initialize
+
+The custom `clientInfo.version` below identifies your application, independently
+of the SDK version.
 
 ```python
 import asyncio

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from importlib.metadata import version
 from typing import Any
 
 import pytest
@@ -13,6 +14,7 @@ from codex_app_server_sdk import (
     CodexProtocolError,
     CodexTransportError,
     CodexTurnInactiveError,
+    __version__,
 )
 from codex_app_server_sdk.models import ChatContinuation
 from codex_app_server_sdk.transport import Transport
@@ -23,6 +25,7 @@ THREAD_A = "thread-a"
 THREAD_B = "thread-b"
 FAILURE_MESSAGE = "controlled server failure"
 APPROVAL_ID = 42
+PACKAGE_NAME = "codex-app-server-sdk"
 APPROVAL_PARAMS = {"threadId": THREAD_A, "turnId": THREAD_A, "itemId": "command-a"}
 
 
@@ -202,6 +205,11 @@ def test_concurrent_turns_receive_their_own_events() -> None:
             )
             methods = [message.get("method") for message in transport.sent]
             assert methods[:2] == ["initialize", "initialized"]
+            assert transport.sent[0]["params"]["clientInfo"] == {
+                "name": PACKAGE_NAME,
+                "version": version(PACKAGE_NAME),
+            }
+            assert __version__ == version(PACKAGE_NAME)
 
     asyncio.run(run())
 

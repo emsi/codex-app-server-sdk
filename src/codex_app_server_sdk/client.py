@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Coroutine, Final, Literal
 
+from ._version import DISTRIBUTION_NAME, __version__
 from .errors import (
     CodexProtocolError,
     CodexTimeoutError,
@@ -2466,8 +2467,8 @@ def _default_initialize_params() -> dict[str, Any]:
     return {
         "protocolVersion": "1",
         "clientInfo": {
-            "name": "codex-app-server-sdk",
-            "version": "0.1.0",
+            "name": DISTRIBUTION_NAME,
+            "version": __version__,
         },
         "capabilities": {
             "optOutNotificationMethods": list(DEFAULT_OPT_OUT_NOTIFICATION_METHODS),

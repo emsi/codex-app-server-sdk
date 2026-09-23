@@ -52,3 +52,6 @@ result = await thread.chat_once("Hello")
 - [`TurnOverrides`](api/models.md#codex_app_server_sdk.models.TurnOverrides) controls per-turn execution options (`cwd`, `model`, `effort`, etc.)
 - when resuming with `continuation=...`, do not pass `text`, `thread_id`,
   `user`, `metadata`, `thread_config`, or `turn_overrides`
+
+For collaboration modes (`default`/`plan`) and server-driven user questions,
+see [Human-in-the-loop](human-in-the-loop.md).

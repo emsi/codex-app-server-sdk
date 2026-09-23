@@ -26,6 +26,11 @@ from .models import (
     FileChangeApprovalDecision,
     FileChangeApprovalRequest,
     InitializeResult,
+    UserInputAnswer,
+    UserInputOption,
+    UserInputQuestion,
+    UserInputRequest,
+    UserInputResponse,
     ThreadConfig,
     TurnOverrides,
     UnsetType,
@@ -41,6 +46,7 @@ from .protocol import (
     ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL_METHOD,
     ITEM_COMPLETED_METHOD,
     ITEM_FILE_CHANGE_REQUEST_APPROVAL_METHOD,
+    ITEM_TOOL_REQUEST_USER_INPUT_METHOD,
     MODEL_LIST_METHOD,
     REVIEW_START_METHOD,
     THREAD_ARCHIVE_METHOD,
@@ -89,6 +95,7 @@ class _TurnSession:
 
 
 _APPROVAL_QUEUE_STOP = object()
+_USER_INPUT_QUEUE_STOP = object()
 
 
 class ThreadHandle:
@@ -308,6 +315,7 @@ class CodexClient:
         *,
         request_timeout: float = 30.0,
         inactivity_timeout: float | None = 180.0,
+        user_input_response_timeout: float | None = 300.0,
         strict: bool = False,
     ) -> None:
         """Create a client bound to a transport.
@@ -317,11 +325,15 @@ class CodexClient:
             request_timeout: Default timeout for request/response calls.
             inactivity_timeout: Turn inactivity timeout in seconds. If None,
                 turn waits can run indefinitely until terminal events.
+            user_input_response_timeout: Timeout for unanswered
+                `item/tool/requestUserInput` requests when no callback handler
+                responds automatically. If `None`, waits indefinitely.
             strict: If True, fail on certain protocol ambiguities.
         """
         self._transport = transport
         self._request_timeout = request_timeout
         self._inactivity_timeout = inactivity_timeout
+        self._user_input_response_timeout = user_input_response_timeout
         self._strict = strict
         self._initialized = False
 
@@ -332,12 +344,17 @@ class CodexClient:
         self._turn_sessions: dict[str, _TurnSession] = {}
         self._approval_requests: asyncio.Queue[ApprovalRequest | object] = asyncio.Queue()
         self._pending_approval_requests: dict[int | str, ApprovalRequest] = {}
+        self._user_input_requests: asyncio.Queue[UserInputRequest | object] = asyncio.Queue()
+        self._pending_user_input_requests: dict[int | str, UserInputRequest] = {}
         self._approval_handler: (
             Callable[
                 [ApprovalRequest],
                 Awaitable[CommandApprovalDecision | FileChangeApprovalDecision],
             ]
             | None
+        ) = None
+        self._user_input_handler: (
+            Callable[[UserInputRequest], Awaitable[UserInputResponse]] | None
         ) = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
@@ -356,6 +373,7 @@ class CodexClient:
         connect_timeout: float = 30.0,
         request_timeout: float = 30.0,
         inactivity_timeout: float | None = 180.0,
+        user_input_response_timeout: float | None = 300.0,
         strict: bool = False,
     ) -> CodexClient:
         """Create an unstarted client configured for stdio transport.
@@ -369,6 +387,9 @@ class CodexClient:
             request_timeout: Default request/response timeout in seconds.
             inactivity_timeout: Default turn inactivity timeout in seconds.
                 If `None`, turn waits are unbounded by inactivity.
+            user_input_response_timeout: Timeout for unanswered
+                `item/tool/requestUserInput` requests when no callback handler
+                responds automatically. If `None`, waits indefinitely.
             strict: Enable strict protocol behavior for ambiguous cases.
 
         Returns:
@@ -385,6 +406,7 @@ class CodexClient:
             transport,
             request_timeout=request_timeout,
             inactivity_timeout=inactivity_timeout,
+            user_input_response_timeout=user_input_response_timeout,
             strict=strict,
         )
         return client
@@ -399,6 +421,7 @@ class CodexClient:
         connect_timeout: float = 30.0,
         request_timeout: float = 30.0,
         inactivity_timeout: float | None = 180.0,
+        user_input_response_timeout: float | None = 300.0,
         strict: bool = False,
     ) -> CodexClient:
         """Create an unstarted client configured for websocket transport.
@@ -412,6 +435,9 @@ class CodexClient:
             request_timeout: Default request/response timeout in seconds.
             inactivity_timeout: Default turn inactivity timeout in seconds.
                 If `None`, turn waits are unbounded by inactivity.
+            user_input_response_timeout: Timeout for unanswered
+                `item/tool/requestUserInput` requests when no callback handler
+                responds automatically. If `None`, waits indefinitely.
             strict: Enable strict protocol behavior for ambiguous cases.
 
         Returns:
@@ -432,6 +458,7 @@ class CodexClient:
             transport,
             request_timeout=request_timeout,
             inactivity_timeout=inactivity_timeout,
+            user_input_response_timeout=user_input_response_timeout,
             strict=strict,
         )
         return client
@@ -486,11 +513,14 @@ class CodexClient:
         self._background_tasks.clear()
 
         self._pending_approval_requests.clear()
+        self._pending_user_input_requests.clear()
         self._approval_handler = None
+        self._user_input_handler = None
 
         self._turn_sessions.clear()
         self._deferred_notifications.clear()
         self._approval_requests.put_nowait(_APPROVAL_QUEUE_STOP)
+        self._user_input_requests.put_nowait(_USER_INPUT_QUEUE_STOP)
 
         await self._transport.close()
         self._started = False
@@ -676,6 +706,116 @@ class CodexClient:
     async def cancel_approval(self, request: ApprovalRequest) -> None:
         """Convenience helper to decline an approval request and cancel turn."""
         await self.respond_approval(request, "cancel")
+
+    def set_user_input_handler(
+        self,
+        handler: Callable[[UserInputRequest], Awaitable[UserInputResponse]] | None,
+    ) -> None:
+        """Set or clear async handler for `item/tool/requestUserInput`.
+
+        Args:
+            handler: Async callback that receives one
+                `UserInputRequest` and returns a `UserInputResponse`.
+                Set to `None` to disable callback handling.
+
+        Notes:
+            If no callback is configured, requests remain available via
+            `user_input_requests()`. Unanswered requests are auto-failed after
+            `user_input_response_timeout` (or never when disabled).
+        """
+        self._user_input_handler = handler
+
+    async def user_input_requests(self) -> AsyncIterator[UserInputRequest]:
+        """Yield parsed user-input requests from the server.
+
+        Yields:
+            Parsed `UserInputRequest` objects from
+            `item/tool/requestUserInput` server requests.
+
+        Notes:
+            This stream is observational. Callback handling via
+            `set_user_input_handler(...)` still runs when configured.
+        """
+        while True:
+            item = await self._user_input_requests.get()
+            if item is _USER_INPUT_QUEUE_STOP:
+                self._user_input_requests.put_nowait(_USER_INPUT_QUEUE_STOP)
+                return
+            if isinstance(item, UserInputRequest):
+                yield item
+
+    async def respond_user_input(
+        self,
+        request: UserInputRequest,
+        response: UserInputResponse,
+    ) -> None:
+        """Respond to one pending user-input request.
+
+        Args:
+            request: Original pending request object.
+            response: Response payload mapping question ids to answers.
+
+        Raises:
+            CodexProtocolError: If request is no longer pending or mismatched.
+        """
+        pending = self._pending_user_input_requests.get(request.request_id)
+        if pending is None:
+            raise CodexProtocolError("user-input request is no longer pending")
+
+        if pending.item_id != request.item_id:
+            raise CodexProtocolError("user-input request item_id mismatch")
+
+        self._pending_user_input_requests.pop(request.request_id, None)
+        payload = _encode_user_input_response(response)
+        rpc_response = make_result_response(request.request_id, payload)
+        async with self._send_lock:
+            await self._transport.send(rpc_response)
+
+    async def respond_user_input_choice(
+        self,
+        request: UserInputRequest,
+        *,
+        question_id: str,
+        selections: Sequence[str],
+    ) -> None:
+        """Respond with selected choices for one question id.
+
+        Args:
+            request: Original pending request object.
+            question_id: Question identifier from `request.questions`.
+            selections: Selected option labels/values.
+        """
+        await self.respond_user_input(
+            request,
+            UserInputResponse(
+                answers={
+                    question_id: UserInputAnswer(answers=list(selections)),
+                }
+            ),
+        )
+
+    async def respond_user_input_other(
+        self,
+        request: UserInputRequest,
+        *,
+        question_id: str,
+        freeform: str,
+    ) -> None:
+        """Respond with a freeform answer for one question id.
+
+        Args:
+            request: Original pending request object.
+            question_id: Question identifier from `request.questions`.
+            freeform: Freeform answer text.
+        """
+        await self.respond_user_input(
+            request,
+            UserInputResponse(
+                answers={
+                    question_id: UserInputAnswer(answers=[freeform]),
+                }
+            ),
+        )
 
     async def start_thread(self, config: ThreadConfig | None = None) -> ThreadHandle:
         """Create a new thread and return a bound handle.
@@ -1735,6 +1875,9 @@ class CodexClient:
         for request_id, request in list(self._pending_approval_requests.items()):
             if request.turn_id == turn_id:
                 self._pending_approval_requests.pop(request_id, None)
+        for request_id, request in list(self._pending_user_input_requests.items()):
+            if request.turn_id == turn_id:
+                self._pending_user_input_requests.pop(request_id, None)
         self._drop_deferred_for_turn(turn_id)
 
     def _drop_deferred_for_turn(self, turn_id: str) -> None:
@@ -1834,6 +1977,7 @@ class CodexClient:
         if method not in {
             ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL_METHOD,
             ITEM_FILE_CHANGE_REQUEST_APPROVAL_METHOD,
+            ITEM_TOOL_REQUEST_USER_INPUT_METHOD,
         }:
             return False
 
@@ -1846,6 +1990,28 @@ class CodexClient:
             )
             async with self._send_lock:
                 await self._transport.send(error)
+            return True
+
+        if method == ITEM_TOOL_REQUEST_USER_INPUT_METHOD:
+            try:
+                request = _parse_user_input_request(
+                    request_id=request_id,
+                    method=method,
+                    params=params,
+                )
+            except CodexProtocolError as exc:
+                error = make_error_response(request_id, -32602, str(exc))
+                async with self._send_lock:
+                    await self._transport.send(error)
+                return True
+
+            self._pending_user_input_requests[request_id] = request
+            await self._user_input_requests.put(request)
+
+            if self._user_input_handler is None:
+                self._spawn_background_task(self._auto_fail_user_input(request))
+            else:
+                self._spawn_background_task(self._run_user_input_handler(request))
             return True
 
         try:
@@ -1901,6 +2067,52 @@ class CodexClient:
         except CodexTransportError:
             return
 
+    async def _auto_fail_user_input(self, request: UserInputRequest) -> None:
+        timeout = self._user_input_response_timeout
+        if timeout is None:
+            return
+
+        try:
+            await asyncio.sleep(timeout)
+        except asyncio.CancelledError:
+            raise
+
+        if request.request_id not in self._pending_user_input_requests:
+            return
+
+        self._pending_user_input_requests.pop(request.request_id, None)
+        error = make_error_response(
+            request.request_id,
+            -32000,
+            "no user input handler/response available",
+        )
+        with contextlib.suppress(CodexTransportError):
+            async with self._send_lock:
+                await self._transport.send(error)
+
+    async def _run_user_input_handler(self, request: UserInputRequest) -> None:
+        handler = self._user_input_handler
+        if handler is None:
+            await self._auto_fail_user_input(request)
+            return
+
+        try:
+            response = await handler(request)
+        except Exception:
+            error = make_error_response(
+                request.request_id,
+                -32000,
+                "user input handler failed",
+            )
+            self._pending_user_input_requests.pop(request.request_id, None)
+            with contextlib.suppress(CodexTransportError):
+                async with self._send_lock:
+                    await self._transport.send(error)
+            return
+
+        with contextlib.suppress(CodexProtocolError, CodexTransportError):
+            await self.respond_user_input(request, response)
+
 
 def _is_unset(value: Any) -> bool:
     return isinstance(value, UnsetType)
@@ -1946,11 +2158,20 @@ def _turn_overrides_to_params(overrides: TurnOverrides | None) -> dict[str, Any]
         ("personality", "personality"),
         ("approval_policy", "approvalPolicy"),
         ("output_schema", "outputSchema"),
+        ("collaboration_mode", "collaborationMode"),
     )
     params: dict[str, Any] = {}
     for attr_name, key_name in mapping:
         value = getattr(overrides, attr_name)
         if _is_unset(value):
+            continue
+        if attr_name == "collaboration_mode":
+            if value is None:
+                params[key_name] = None
+            elif isinstance(value, Mapping):
+                params[key_name] = dict(value)
+            else:
+                params[key_name] = _collaboration_mode_to_params(value)
             continue
         params[key_name] = value
     return params
@@ -1991,6 +2212,27 @@ def _merge_thread_config(base: ThreadConfig, override: ThreadConfig | None) -> T
         ephemeral=pick(base.ephemeral, override.ephemeral),
         config=pick(base.config, override.config),
     )
+
+
+def _collaboration_mode_to_params(mode_value: Any) -> dict[str, Any]:
+    """Encode collaboration mode dataclass-like object to protocol params."""
+    mode = getattr(mode_value, "mode", None)
+    settings = getattr(mode_value, "settings", None)
+    if not isinstance(mode, str) or settings is None:
+        raise ValueError("invalid collaboration_mode object")
+
+    model = getattr(settings, "model", None)
+    if not isinstance(model, str) or not model:
+        raise ValueError("collaboration_mode.settings.model must be non-empty")
+
+    return {
+        "mode": mode,
+        "settings": {
+            "model": model,
+            "reasoning_effort": getattr(settings, "reasoning_effort", None),
+            "developer_instructions": getattr(settings, "developer_instructions", None),
+        },
+    }
 
 
 def _filter_none(values: Mapping[str, Any]) -> dict[str, Any]:
@@ -2256,6 +2498,61 @@ def _extract_item_text(item: Mapping[str, Any]) -> str | None:
                 return "\n".join(parts)
 
     return None
+
+
+def _parse_user_input_request(
+    *,
+    request_id: int | str,
+    method: str,
+    params: Mapping[str, Any],
+) -> UserInputRequest:
+    questions_value = params.get("questions")
+    if not isinstance(questions_value, list):
+        raise CodexProtocolError(f"{method} missing required array field: questions")
+
+    questions = [_parse_user_input_question(entry, method=method) for entry in questions_value]
+
+    return UserInputRequest(
+        request_id=request_id,
+        thread_id=_require_string_field(params, "threadId", method),
+        turn_id=_require_string_field(params, "turnId", method),
+        item_id=_require_string_field(params, "itemId", method),
+        questions=questions,
+    )
+
+
+def _parse_user_input_question(value: Any, *, method: str) -> UserInputQuestion:
+    if not isinstance(value, Mapping):
+        raise CodexProtocolError(f"{method} question entry must be an object")
+
+    options_value = value.get("options")
+    options: list[UserInputOption] | None = None
+    if isinstance(options_value, list):
+        options = []
+        for entry in options_value:
+            if not isinstance(entry, Mapping):
+                continue
+            label = _optional_string(entry.get("label"))
+            description = _optional_string(entry.get("description"))
+            if label is None or description is None:
+                continue
+            options.append(UserInputOption(label=label, description=description))
+
+    return UserInputQuestion(
+        id=_require_string_field(value, "id", method),
+        header=_require_string_field(value, "header", method),
+        question=_require_string_field(value, "question", method),
+        is_other=bool(value.get("isOther", False)),
+        is_secret=bool(value.get("isSecret", False)),
+        options=options,
+    )
+
+
+def _encode_user_input_response(response: UserInputResponse) -> dict[str, Any]:
+    answers: dict[str, dict[str, list[str]]] = {}
+    for key, value in response.answers.items():
+        answers[key] = {"answers": list(value.answers)}
+    return {"answers": answers}
 
 
 def _parse_approval_request(

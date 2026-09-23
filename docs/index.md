@@ -12,6 +12,7 @@ This documentation is organized around:
 
 - Start here: [Getting started](getting-started.md)
 - Streaming semantics: [Conversation APIs](conversation.md)
+- Plan mode and user confirmation: [Human-in-the-loop](human-in-the-loop.md)
 - Long-running turn control: [Timeouts, continuation, cancel](timeouts-continuation-cancel.md)
 - Thread/model/config scope: [Threads and configuration](threads-and-config.md)
 - Ready-to-run scripts: [Examples](examples.md)

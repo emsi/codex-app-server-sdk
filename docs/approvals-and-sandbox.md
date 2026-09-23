@@ -127,3 +127,6 @@ async with CodexClient.connect_stdio() as client:
 ```
 
 `approval_requests()` is observational. If a callback is configured, callback handling remains authoritative.
+
+For plan-mode user questions (`item/tool/requestUserInput`), see
+[Human-in-the-loop](human-in-the-loop.md).

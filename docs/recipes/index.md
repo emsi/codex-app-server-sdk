@@ -13,6 +13,7 @@ Task-oriented guides for common usage patterns.
 ## Guides
 
 - [Conversation APIs](../conversation.md)
+- [Human-in-the-loop: plan mode and user questions](../human-in-the-loop.md)
 - [Transports](../transports.md)
 - [Approval requests and sandbox policies](../approvals-and-sandbox.md)
 - [Timeouts, continuation, cancel](../timeouts-continuation-cancel.md)

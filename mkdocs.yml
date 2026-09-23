@@ -41,6 +41,7 @@ nav:
   - Recipes:
       - Overview: recipes/index.md
       - Conversation APIs: conversation.md
+      - Human-in-the-loop: human-in-the-loop.md
       - Transports: transports.md
       - Approvals and sandbox: approvals-and-sandbox.md
       - Timeouts, continuation, cancel: timeouts-continuation-cancel.md

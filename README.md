@@ -14,6 +14,8 @@ Documentation: https://emsi.github.io/codex-app-server-sdk/
 - thread-scoped config + forking via `ThreadHandle`
 - inactivity timeout continuation for long-running turns
 - turn cancellation with unread-step/event drain via `cancel(...)`
+- collaboration mode overrides (`default`/`plan`) via `TurnOverrides`
+- human-in-the-loop user input handling (`item/tool/requestUserInput`)
 - optional low-level `request(...)` access when needed
 
 ## Install
@@ -40,6 +42,7 @@ uv pip install codex-app-server-sdk
 
 - Docs site: https://emsi.github.io/codex-app-server-sdk/
 - PyPI: https://pypi.org/project/codex-app-server-sdk/
+- Human-in-the-loop guide: https://emsi.github.io/codex-app-server-sdk/human-in-the-loop/
 
 ## Quick start
 

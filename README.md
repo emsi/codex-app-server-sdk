@@ -18,6 +18,42 @@ Documentation: https://emsi.github.io/codex-app-server-sdk/
 - human-in-the-loop user input handling (`item/tool/requestUserInput`)
 - optional low-level `request(...)` access when needed
 
+## Why use this client?
+
+Protocol I/O and callbacks run directly on your application's `asyncio` event
+loop, using asynchronous subprocess pipes or WebSockets. Thread handles share
+one connection, and approvals can integrate with an async callback or a manual
+UI response loop.
+
+You control the Codex runtime: launch your chosen executable or connect to an
+existing WebSocket server. The conversation API adds completed-step streaming,
+resumable inactivity timeouts, and cancellation with unread-event recovery.
+The `Transport` interface and raw `request(...)` method remain available for
+application-specific integrations.
+
+### Compared with `openai-codex`
+
+Both libraries use the Codex app-server protocol. Their integration choices differ:
+
+| Area | `codex-app-server-sdk` | `openai-codex` |
+| --- | --- | --- |
+| Execution | Native `asyncio` client; asynchronous protocol I/O on your event loop | Synchronous client with an async wrapper that offloads blocking operations to background threads |
+| Transport | Public, replaceable `Transport`; built-in stdio and WebSocket support | SDK-managed subprocess communicating through line-delimited JSON over stdio |
+| Protocol access | Flexible dictionary-based RPC via `request(...)`, plus high-level conversation models | Extensive generated types, typed responses, and typed notifications |
+| Runtime management | You supply and manage Codex; choose an executable or connect to an existing WebSocket server | Installs an exactly pinned Codex runtime dependency by default |
+
+This client fits applications that need native async I/O, custom transports,
+connections to an existing server, or independent control over runtime upgrades.
+The official SDK offers broader generated type coverage and a reproducible
+runtime default. You are responsible for installing and updating Codex when
+using this client.
+
+Comparison verified against the published
+[`openai-codex` 0.156.1](https://pypi.org/project/openai-codex/0.156.1/)
+source and package metadata on 2026-09-23. The official SDK also supports a
+[`CodexConfig(codex_bin=...)` override](https://learn.chatgpt.com/docs/codex-sdk)
+for selecting a different local executable.
+
 ## Install
 
 Install `uv` (if needed):

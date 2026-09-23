@@ -90,8 +90,8 @@ class CancelResult(BaseModel):
         turn_id: Turn id that was cancelled.
         steps: Unread completed step objects accumulated since continuation cursor.
         raw_events: Unread raw events accumulated since continuation cursor.
-        was_completed: True if the turn was already completed when cancelling.
-        was_interrupted: True if an interrupt request was sent.
+        was_completed: True if successful turn completion was observed.
+        was_interrupted: True if the server confirmed an interrupted turn.
     """
 
     thread_id: str
@@ -188,7 +188,9 @@ SandboxPolicy: TypeAlias = (
 #:
 #: Values are ordered from lowest to highest: ``none``, ``minimal``, ``low``,
 #: ``medium``, ``high``, ``xhigh``.
-ReasoningEffort: TypeAlias = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+ReasoningEffort: TypeAlias = Literal[
+    "none", "minimal", "low", "medium", "high", "xhigh"
+]
 
 #: Reasoning summary verbosity preference.
 #:
@@ -373,4 +375,6 @@ CommandApprovalDecision: TypeAlias = (
     Literal["accept", "accept_for_session", "decline", "cancel"]
     | CommandApprovalWithExecpolicyAmendment
 )
-FileChangeApprovalDecision: TypeAlias = Literal["accept", "accept_for_session", "decline", "cancel"]
+FileChangeApprovalDecision: TypeAlias = Literal[
+    "accept", "accept_for_session", "decline", "cancel"
+]

@@ -103,14 +103,18 @@ async with CodexClient.connect_stdio(user_input_response_timeout=None) as client
 ## Handling approvals and user-input together
 
 If a turn can trigger both approval requests and user-input requests, run both
-streams concurrently while awaiting `chat_once(...)` or consuming `chat(...)`.
+streams concurrently while awaiting
+[`chat_once(...)`](api/client.md#codex_app_server_sdk.client.CodexClient.chat_once)
+or consuming [`chat(...)`](api/client.md#codex_app_server_sdk.client.CodexClient.chat).
 
 ```python
 import asyncio
 from contextlib import suppress
 from codex_app_server_sdk import CodexClient, CommandApprovalRequest
 
-async with CodexClient.connect_stdio(user_input_response_timeout=None) as client:
+async with CodexClient.connect_stdio(
+    approval_mode="manual", user_input_response_timeout=None
+) as client:
     async def approvals_loop():
         async for req in client.approval_requests():
             if isinstance(req, CommandApprovalRequest):

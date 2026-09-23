@@ -6,7 +6,7 @@ import os
 import shlex
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Coroutine, Literal
+from typing import Any, Awaitable, Callable, Coroutine, Final, Literal
 
 from .errors import (
     CodexProtocolError,
@@ -91,11 +91,18 @@ class _TurnSession:
     completed: bool = False
     failed: bool = False
     failure_message: str | None = None
+    failure_data: dict[str, Any] | None = None
     interrupted: bool = False
 
 
 _APPROVAL_QUEUE_STOP = object()
 _USER_INPUT_QUEUE_STOP = object()
+_APPROVAL_AUTO_MODE: Final = "auto"
+_APPROVAL_MANUAL_MODE: Final = "manual"
+_TURN_FAILED_STATUS = "failed"
+_TURN_INTERRUPTED_STATUS = "interrupted"
+_SERVER_REQUEST_RESOLVED_METHOD = "serverRequest/resolved"
+_INITIALIZED_METHOD = "initialized"
 
 
 class ThreadHandle:
@@ -247,7 +254,9 @@ class ThreadHandle:
         Returns:
             Raw `thread/read` response payload.
         """
-        return await self._client.read_thread(self._thread_id, include_turns=include_turns)
+        return await self._client.read_thread(
+            self._thread_id, include_turns=include_turns
+        )
 
     async def set_name(self, name: str) -> None:
         """Set user-facing name for this thread.
@@ -316,35 +325,47 @@ class CodexClient:
         request_timeout: float = 30.0,
         inactivity_timeout: float | None = 180.0,
         user_input_response_timeout: float | None = 300.0,
+        approval_mode: Literal["auto", "manual"] = _APPROVAL_AUTO_MODE,
         strict: bool = False,
     ) -> None:
-        """Create a client bound to a transport.
+        """
+        Create a client bound to a transport.
 
-        Args:
-            transport: Connected or connectable transport instance.
-            request_timeout: Default timeout for request/response calls.
-            inactivity_timeout: Turn inactivity timeout in seconds. If None,
-                turn waits can run indefinitely until terminal events.
-            user_input_response_timeout: Timeout for unanswered
-                `item/tool/requestUserInput` requests when no callback handler
-                responds automatically. If `None`, waits indefinitely.
-            strict: If True, fail on certain protocol ambiguities.
+        :param transport: Connected or connectable transport instance.
+        :param request_timeout: Default request/response timeout in seconds.
+        :param inactivity_timeout: Turn inactivity timeout; None disables it.
+        :param user_input_response_timeout: Timeout for unanswered user-input
+            requests without a callback; None disables it.
+        :param approval_mode: Without a callback, auto declines approvals and
+            manual keeps them pending for explicit responses.
+        :param strict: Enable strict handling of protocol ambiguities.
+        :return: None.
         """
         self._transport = transport
         self._request_timeout = request_timeout
         self._inactivity_timeout = inactivity_timeout
         self._user_input_response_timeout = user_input_response_timeout
+        if approval_mode not in {_APPROVAL_AUTO_MODE, _APPROVAL_MANUAL_MODE}:
+            raise ValueError("approval_mode must be 'auto' or 'manual'")
+        self._approval_mode = approval_mode
         self._strict = strict
         self._initialized = False
+        self._initialize_lock = asyncio.Lock()
+        self._initialize_result: InitializeResult | None = None
 
         self._next_request_id = 1
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
-        self._notifications: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._notification_ready = asyncio.Condition()
+        self._transport_error: CodexTransportError | None = None
         self._deferred_notifications: list[dict[str, Any]] = []
         self._turn_sessions: dict[str, _TurnSession] = {}
-        self._approval_requests: asyncio.Queue[ApprovalRequest | object] = asyncio.Queue()
+        self._approval_requests: asyncio.Queue[ApprovalRequest | object] = (
+            asyncio.Queue()
+        )
         self._pending_approval_requests: dict[int | str, ApprovalRequest] = {}
-        self._user_input_requests: asyncio.Queue[UserInputRequest | object] = asyncio.Queue()
+        self._user_input_requests: asyncio.Queue[UserInputRequest | object] = (
+            asyncio.Queue()
+        )
         self._pending_user_input_requests: dict[int | str, UserInputRequest] = {}
         self._approval_handler: (
             Callable[
@@ -374,28 +395,29 @@ class CodexClient:
         request_timeout: float = 30.0,
         inactivity_timeout: float | None = 180.0,
         user_input_response_timeout: float | None = 300.0,
+        approval_mode: Literal["auto", "manual"] = _APPROVAL_AUTO_MODE,
         strict: bool = False,
     ) -> CodexClient:
-        """Create an unstarted client configured for stdio transport.
-
-        Args:
-            command: Optional command argv. Defaults to `CODEX_APP_SERVER_CMD`
-                or `["codex", "app-server"]`.
-            cwd: Optional subprocess working directory.
-            env: Optional subprocess environment overrides.
-            connect_timeout: Subprocess spawn timeout in seconds.
-            request_timeout: Default request/response timeout in seconds.
-            inactivity_timeout: Default turn inactivity timeout in seconds.
-                If `None`, turn waits are unbounded by inactivity.
-            user_input_response_timeout: Timeout for unanswered
-                `item/tool/requestUserInput` requests when no callback handler
-                responds automatically. If `None`, waits indefinitely.
-            strict: Enable strict protocol behavior for ambiguous cases.
-
-        Returns:
-            Unstarted `CodexClient` using `StdioTransport`.
         """
-        resolved_command = list(command) if command is not None else _default_stdio_command()
+        Create an unstarted client using asynchronous subprocess pipes.
+
+        :param command: Server argv; defaults to CODEX_APP_SERVER_CMD or
+            ``["codex", "app-server"]``.
+        :param cwd: Optional subprocess working directory.
+        :param env: Optional subprocess environment.
+        :param connect_timeout: Subprocess spawn timeout in seconds.
+        :param request_timeout: Default request/response timeout in seconds.
+        :param inactivity_timeout: Turn inactivity timeout; None disables it.
+        :param user_input_response_timeout: Timeout for unanswered user-input
+            requests without a callback; None disables it.
+        :param approval_mode: Without a callback, auto declines approvals and
+            manual waits for explicit responses.
+        :param strict: Enable strict handling of protocol ambiguities.
+        :return: Unstarted client using StdioTransport.
+        """
+        resolved_command = (
+            list(command) if command is not None else _default_stdio_command()
+        )
         transport = StdioTransport(
             resolved_command,
             cwd=cwd,
@@ -407,6 +429,7 @@ class CodexClient:
             request_timeout=request_timeout,
             inactivity_timeout=inactivity_timeout,
             user_input_response_timeout=user_input_response_timeout,
+            approval_mode=approval_mode,
             strict=strict,
         )
         return client
@@ -422,28 +445,29 @@ class CodexClient:
         request_timeout: float = 30.0,
         inactivity_timeout: float | None = 180.0,
         user_input_response_timeout: float | None = 300.0,
+        approval_mode: Literal["auto", "manual"] = _APPROVAL_AUTO_MODE,
         strict: bool = False,
     ) -> CodexClient:
-        """Create an unstarted client configured for websocket transport.
-
-        Args:
-            url: Optional websocket URL. Defaults to `CODEX_APP_SERVER_WS_URL`
-                or `ws://127.0.0.1:8765`.
-            token: Optional bearer token. Defaults to `CODEX_APP_SERVER_TOKEN`.
-            headers: Optional extra websocket headers.
-            connect_timeout: Websocket handshake timeout in seconds.
-            request_timeout: Default request/response timeout in seconds.
-            inactivity_timeout: Default turn inactivity timeout in seconds.
-                If `None`, turn waits are unbounded by inactivity.
-            user_input_response_timeout: Timeout for unanswered
-                `item/tool/requestUserInput` requests when no callback handler
-                responds automatically. If `None`, waits indefinitely.
-            strict: Enable strict protocol behavior for ambiguous cases.
-
-        Returns:
-            Unstarted `CodexClient` using `WebSocketTransport`.
         """
-        resolved_url = url or os.getenv("CODEX_APP_SERVER_WS_URL") or "ws://127.0.0.1:8765"
+        Create an unstarted client using asynchronous WebSocket I/O.
+
+        :param url: Endpoint; defaults to CODEX_APP_SERVER_WS_URL or
+            ws://127.0.0.1:8765.
+        :param token: Bearer token; defaults to CODEX_APP_SERVER_TOKEN.
+        :param headers: Optional additional handshake headers.
+        :param connect_timeout: WebSocket connection timeout in seconds.
+        :param request_timeout: Default request/response timeout in seconds.
+        :param inactivity_timeout: Turn inactivity timeout; None disables it.
+        :param user_input_response_timeout: Timeout for unanswered user-input
+            requests without a callback; None disables it.
+        :param approval_mode: Without a callback, auto declines approvals and
+            manual waits for explicit responses.
+        :param strict: Enable strict handling of protocol ambiguities.
+        :return: Unstarted client using WebSocketTransport.
+        """
+        resolved_url = (
+            url or os.getenv("CODEX_APP_SERVER_WS_URL") or "ws://127.0.0.1:8765"
+        )
         resolved_token = token or os.getenv("CODEX_APP_SERVER_TOKEN")
         resolved_headers = dict(headers) if headers is not None else {}
         if resolved_token and "Authorization" not in resolved_headers:
@@ -459,6 +483,7 @@ class CodexClient:
             request_timeout=request_timeout,
             inactivity_timeout=inactivity_timeout,
             user_input_response_timeout=user_input_response_timeout,
+            approval_mode=approval_mode,
             strict=strict,
         )
         return client
@@ -494,6 +519,8 @@ class CodexClient:
         if self._closed:
             return
         self._closed = True
+        async with self._notification_ready:
+            self._notification_ready.notify_all()
 
         if self._receiver_task is not None:
             self._receiver_task.cancel()
@@ -531,35 +558,41 @@ class CodexClient:
         *,
         timeout: float | None = None,
     ) -> InitializeResult:
-        """Perform initialize handshake and cache client initialization state.
-
-        This method is optional for normal chat usage because `chat_once()` and `chat()`
-        initialize automatically on first use. Call it explicitly when you want to fail
-        fast on handshake issues or inspect server protocol/capabilities metadata.
-
-        Args:
-            params: Optional initialize request payload. The payload is merged with
-                library defaults via `_prepare_initialize_params()`, including capability
-                opt-out defaults when applicable.
-            timeout: Optional per-request timeout override in seconds.
-
-        Returns:
-            Parsed initialize result containing normalized protocol/server fields
-            and raw initialize payload.
         """
-        payload = _prepare_initialize_params(params)
-        result = await self.request(INITIALIZE_METHOD, payload, timeout=timeout)
-        result_dict = result if isinstance(result, dict) else {"value": result}
-        self._initialized = True
-        return InitializeResult(
-            protocol_version=_find_first_string_by_exact_keys(
-                result_dict,
-                {"protocolversion", "protocol_version"},
-            ),
-            server_info=_find_first_dict_by_exact_key(result_dict, {"serverinfo", "server_info"}),
-            capabilities=_find_first_dict_by_exact_key(result_dict, {"capabilities"}),
-            raw=result_dict,
-        )
+        Initialize once per connection, including concurrent first calls.
+
+        Send initialize followed by initialized. Subsequent calls return the
+        cached result; parameters from the first successful call take effect.
+        The high-level chat and thread-creation methods call this automatically.
+
+        :param params: Optional payload merged with library defaults.
+        :param timeout: Optional request timeout in seconds.
+        :return: Parsed and raw initialization result.
+        """
+        async with self._initialize_lock:
+            if self._closed:
+                raise CodexTransportError("client is closed")
+            if self._initialize_result is not None:
+                return self._initialize_result
+            payload = _prepare_initialize_params(params)
+            result = await self.request(INITIALIZE_METHOD, payload, timeout=timeout)
+            result_dict = result if isinstance(result, dict) else {"value": result}
+            async with self._send_lock:
+                await self._transport.send({"method": _INITIALIZED_METHOD})
+            self._initialize_result = InitializeResult(
+                protocol_version=_find_first_string_by_exact_keys(
+                    result_dict, {"protocolversion", "protocol_version"}
+                ),
+                server_info=_find_first_dict_by_exact_key(
+                    result_dict, {"serverinfo", "server_info"}
+                ),
+                capabilities=_find_first_dict_by_exact_key(
+                    result_dict, {"capabilities"}
+                ),
+                raw=result_dict,
+            )
+            self._initialized = True
+            return self._initialize_result
 
     async def request(
         self,
@@ -590,7 +623,9 @@ class CodexClient:
         request_id = self._next_request_id
         self._next_request_id += 1
 
-        message = make_request(request_id, method, dict(params) if params is not None else None)
+        message = make_request(
+            request_id, method, dict(params) if params is not None else None
+        )
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending[request_id] = future
@@ -635,15 +670,16 @@ class CodexClient:
         - `item/commandExecution/requestApproval`
         - `item/fileChange/requestApproval`
 
-        If no handler is configured, requests are auto-declined.
+        Without a handler, `approval_mode="auto"` declines requests and
+        `approval_mode="manual"` keeps them pending for explicit responses.
         """
         self._approval_handler = handler
 
     async def approval_requests(self) -> AsyncIterator[ApprovalRequest]:
         """Yield parsed approval requests from the server.
 
-        This stream is observational; automatic callback handling (or auto-decline
-        default) still applies.
+        Use `approval_mode="manual"` without a callback for manual responses.
+        Otherwise the stream observes callback handling or automatic decline.
         """
         while True:
             item = await self._approval_requests.get()
@@ -659,18 +695,18 @@ class CodexClient:
         decision: CommandApprovalDecision | FileChangeApprovalDecision,
     ) -> None:
         """Respond to one pending approval request."""
-        pending = self._pending_approval_requests.get(request.request_id)
-        if pending is None:
-            raise CodexProtocolError("approval request is no longer pending")
-
-        if type(pending) is not type(request):
-            raise CodexProtocolError("approval request type mismatch")
-
-        self._pending_approval_requests.pop(request.request_id, None)
         result_payload = _encode_approval_result(request, decision)
         response = make_result_response(request.request_id, result_payload)
         async with self._send_lock:
+            pending = self._pending_approval_requests.get(request.request_id)
+            if pending is None:
+                raise CodexProtocolError("approval request is no longer pending")
+            if pending != request:
+                raise CodexProtocolError(
+                    "approval request does not match pending request"
+                )
             await self._transport.send(response)
+            self._pending_approval_requests.pop(request.request_id, None)
 
     async def approve_approval(
         self,
@@ -692,8 +728,10 @@ class CodexClient:
             return
 
         if execpolicy_amendment is not None:
-            decision_cmd: CommandApprovalDecision = CommandApprovalWithExecpolicyAmendment(
-                execpolicy_amendment=list(execpolicy_amendment)
+            decision_cmd: CommandApprovalDecision = (
+                CommandApprovalWithExecpolicyAmendment(
+                    execpolicy_amendment=list(execpolicy_amendment)
+                )
             )
         else:
             decision_cmd = "accept_for_session" if for_session else "accept"
@@ -837,7 +875,9 @@ class CodexClient:
         thread_id = _extract_thread_id(result)
         if not thread_id:
             raise CodexProtocolError("thread/start succeeded but no thread id found")
-        return ThreadHandle(self, thread_id, defaults=config if config is not None else ThreadConfig())
+        return ThreadHandle(
+            self, thread_id, defaults=config if config is not None else ThreadConfig()
+        )
 
     async def resume_thread(
         self,
@@ -893,14 +933,18 @@ class CodexClient:
         result = await self.request(THREAD_FORK_METHOD, params)
         forked_thread_id = _extract_thread_id(result)
         if not forked_thread_id:
-            raise CodexProtocolError("thread/fork succeeded but no forked thread id found")
+            raise CodexProtocolError(
+                "thread/fork succeeded but no forked thread id found"
+            )
         return ThreadHandle(
             self,
             forked_thread_id,
             defaults=overrides if overrides is not None else ThreadConfig(),
         )
 
-    async def set_thread_defaults(self, thread_id: str, overrides: ThreadConfig) -> None:
+    async def set_thread_defaults(
+        self, thread_id: str, overrides: ThreadConfig
+    ) -> None:
         """Apply thread-level defaults to an existing thread.
 
         Args:
@@ -959,9 +1003,9 @@ class CodexClient:
                 "cursor": cursor,
                 "cwd": cwd,
                 "limit": limit,
-                "modelProviders": list(model_providers)
-                if model_providers is not None
-                else None,
+                "modelProviders": (
+                    list(model_providers) if model_providers is not None else None
+                ),
                 "sortKey": sort_key,
                 "sortDirection": sort_direction,
             }
@@ -975,7 +1019,9 @@ class CodexClient:
             thread_id: Target thread id.
             name: Thread display name.
         """
-        await self.request(THREAD_NAME_SET_METHOD, {"threadId": thread_id, "name": name})
+        await self.request(
+            THREAD_NAME_SET_METHOD, {"threadId": thread_id, "name": name}
+        )
 
     async def archive_thread(self, thread_id: str) -> None:
         """Archive a thread.
@@ -1282,13 +1328,17 @@ class CodexClient:
                 turn_overrides=turn_overrides,
             )
 
-        cursor = continuation.cursor if continuation is not None else len(session.raw_events)
+        cursor = (
+            continuation.cursor if continuation is not None else len(session.raw_events)
+        )
         timeout_value = self._resolve_inactivity_timeout(inactivity_timeout)
 
         while True:
-            if session.failed:
+            if session.failed or session.interrupted:
                 self._cleanup_turn_state(session.turn_id)
-                raise CodexProtocolError(session.failure_message or "turn failed")
+                raise CodexProtocolError(
+                    session.failure_message or "turn failed", data=session.failure_data
+                )
 
             if session.completed:
                 break
@@ -1309,7 +1359,9 @@ class CodexClient:
 
         assistant_item_id: str | None = None
         final_text = ""
-        completion_source: Literal["item_completed", "thread_read_fallback"] | None = None
+        completion_source: Literal["item_completed", "thread_read_fallback"] | None = (
+            None
+        )
 
         if session.completed_agent_messages:
             assistant_item_id, final_text = session.completed_agent_messages[-1]
@@ -1432,9 +1484,11 @@ class CodexClient:
             cursor = len(session.raw_events)
 
         while True:
-            if session.failed:
+            if session.failed or session.interrupted:
                 self._cleanup_turn_state(session.turn_id)
-                raise CodexProtocolError(session.failure_message or "turn failed")
+                raise CodexProtocolError(
+                    session.failure_message or "turn failed", data=session.failure_data
+                )
 
             if session.completed:
                 self._cleanup_turn_state(session.turn_id)
@@ -1464,19 +1518,18 @@ class CodexClient:
         *,
         timeout: float | None = None,
     ) -> CancelResult:
-        """Interrupt a running turn and return unread data since continuation cursor.
+        """Interrupt a turn and release its state only after terminal confirmation.
 
-        Args:
-            continuation: Continuation token for the active turn session.
-            timeout: Optional timeout for interrupt/drain wait. Defaults to
-                client request timeout.
+        RPC failures propagate and leave the continuation usable. If no terminal
+        event arrives within the drain timeout, `CodexTurnInactiveError` retains
+        the original unread cursor so callers can resume or retry cancellation.
 
-        Returns:
-            `CancelResult` containing unread steps/events and terminal flags.
-
-        Notes:
-            Internal turn state is cleaned after cancel so the thread can be
-            reused for new turns.
+        :param continuation: Token for a turn retained by this client.
+        :param timeout: Interrupt RPC and subsequent drain timeout in seconds;
+            defaults to the client's request timeout.
+        :return: Unread events/steps and observed completion flags.
+        :raises CodexProtocolError: If the token is invalid or interruption fails.
+        :raises CodexTurnInactiveError: If terminal confirmation times out.
         """
         wait_timeout = timeout if timeout is not None else self._request_timeout
         turn_id = continuation.turn_id
@@ -1484,42 +1537,32 @@ class CodexClient:
         cursor = max(0, continuation.cursor)
 
         session = self._turn_sessions.get(turn_id)
-
         if session is None:
-            was_interrupted = False
-            with contextlib.suppress(
-                CodexProtocolError,
-                CodexTimeoutError,
-                CodexTransportError,
-            ):
-                await self.interrupt_turn(turn_id, timeout=timeout)
-                was_interrupted = True
-            self._drop_deferred_for_turn(turn_id)
-            return CancelResult(
-                thread_id=thread_id,
-                turn_id=turn_id,
-                was_interrupted=was_interrupted,
+            raise CodexProtocolError(
+                "continuation is no longer available in this client instance"
             )
 
         if session.thread_id != thread_id:
-            raise CodexProtocolError("continuation thread_id does not match active turn session")
+            raise CodexProtocolError(
+                "continuation thread_id does not match active turn session"
+            )
 
-        was_interrupted = False
+        await self._pump_turn_session(session, max_wait=0)
         if not session.completed and not session.failed:
-            with contextlib.suppress(
-                CodexProtocolError,
-                CodexTimeoutError,
-                CodexTransportError,
-            ):
-                await self.interrupt_turn(turn_id, timeout=timeout)
-                was_interrupted = True
-                session.interrupted = True
-
+            await self.interrupt_turn(turn_id, thread_id=thread_id, timeout=timeout)
             await self._pump_turn_session(session, max_wait=wait_timeout)
+            if not session.completed and not session.failed:
+                raise CodexTurnInactiveError(
+                    "interruption was requested but terminal confirmation timed out",
+                    continuation=continuation,
+                    idle_seconds=wait_timeout,
+                )
 
         unread_events = list(session.raw_events[cursor:])
         unread_steps = [
-            record.step for record in session.step_records if record.event_index >= cursor
+            record.step
+            for record in session.step_records
+            if record.event_index >= cursor
         ]
 
         result = CancelResult(
@@ -1527,23 +1570,44 @@ class CodexClient:
             turn_id=session.turn_id,
             steps=unread_steps,
             raw_events=unread_events,
-            was_completed=session.completed,
-            was_interrupted=was_interrupted,
+            was_completed=session.completed
+            and not session.failed
+            and not session.interrupted,
+            was_interrupted=session.interrupted,
         )
 
         self._cleanup_turn_state(turn_id)
         return result
 
-    async def interrupt_turn(self, turn_id: str, *, timeout: float | None = None) -> None:
-        """Send best-effort `turn/interrupt` for a running turn.
+    async def interrupt_turn(
+        self,
+        turn_id: str,
+        *,
+        thread_id: str | None = None,
+        timeout: float | None = None,
+    ) -> None:
+        """Request interruption using both required wire identifiers.
 
-        Args:
-            turn_id: Running turn id to interrupt.
-            timeout: Optional per-request timeout override in seconds.
+        An acknowledged request does not confirm terminal completion; use
+        `cancel()` when the SDK owns a continuation and must drain the turn.
+
+        :param turn_id: Running turn to interrupt.
+        :param thread_id: Owning thread, inferred for turns tracked by this client.
+            Required for turns started through low-level requests.
+        :param timeout: Optional request timeout in seconds.
+        :return: None after the server acknowledges the interrupt request.
+        :raises ValueError: If the thread is unknown or conflicts with local state.
         """
+        session = self._turn_sessions.get(turn_id)
+        if thread_id is None and session is not None:
+            thread_id = session.thread_id
+        if not thread_id:
+            raise ValueError("thread_id is required for an untracked turn")
+        if session is not None and session.thread_id != thread_id:
+            raise ValueError("thread_id does not match the tracked turn")
         await self.request(
             TURN_INTERRUPT_METHOD,
-            {"turnId": turn_id},
+            {"threadId": thread_id, "turnId": turn_id},
             timeout=timeout,
         )
 
@@ -1672,7 +1736,9 @@ class CodexClient:
             thread_result = await self.request(THREAD_START_METHOD, thread_params)
             active_thread_id = _extract_thread_id(thread_result)
             if not active_thread_id:
-                raise CodexProtocolError("thread/start succeeded but no thread id found")
+                raise CodexProtocolError(
+                    "thread/start succeeded but no thread id found"
+                )
             return active_thread_id
 
         resume_params: dict[str, Any] = {"threadId": thread_id}
@@ -1697,10 +1763,14 @@ class CodexClient:
 
         session = self._turn_sessions.get(continuation.turn_id)
         if session is None:
-            raise CodexProtocolError("continuation is no longer available in this client instance")
+            raise CodexProtocolError(
+                "continuation is no longer available in this client instance"
+            )
 
         if session.thread_id != continuation.thread_id:
-            raise CodexProtocolError("continuation thread_id does not match active turn session")
+            raise CodexProtocolError(
+                "continuation thread_id does not match active turn session"
+            )
 
         return session
 
@@ -1710,6 +1780,12 @@ class CodexClient:
         *,
         max_wait: float | None,
     ) -> None:
+        """Drain buffered events, then wait up to the deadline for termination.
+
+        :param session: Turn whose unread events should be collected.
+        :param max_wait: Additional wait in seconds; zero only drains buffered events.
+        :return: None; terminal flags are updated on the session.
+        """
         if session.completed or session.failed:
             return
 
@@ -1717,6 +1793,12 @@ class CodexClient:
         deadline = None if max_wait is None else (loop.time() + max_wait)
 
         while not session.completed and not session.failed:
+            buffered_index = self._find_deferred_for_turn(session.turn_id)
+            if buffered_index is not None:
+                self._apply_event_to_session(
+                    session, self._deferred_notifications.pop(buffered_index)
+                )
+                continue
             timeout_value: float | None = None
             if deadline is not None:
                 remaining = deadline - loop.time()
@@ -1743,35 +1825,32 @@ class CodexClient:
         *,
         inactivity_timeout: float | None,
     ) -> dict[str, Any]:
-        loop = asyncio.get_running_loop()
-        deadline = None
-        if inactivity_timeout is not None:
-            deadline = loop.time() + inactivity_timeout
+        """Consume only this turn's events from the shared notification buffer.
 
-        while True:
-            deferred_idx = self._find_deferred_for_turn(turn_id)
-            if deferred_idx is not None:
-                return self._deferred_notifications.pop(deferred_idx)
+        :param turn_id: Turn whose next event is requested.
+        :param inactivity_timeout: Maximum wait for a matching event, or None.
+        :return: The earliest buffered event matching this turn.
+        """
+        async with asyncio.timeout(inactivity_timeout), self._notification_ready:
+            while True:
+                deferred_idx = self._find_deferred_for_turn(turn_id)
+                if deferred_idx is not None:
+                    return self._deferred_notifications.pop(deferred_idx)
+                if self._transport_error is not None:
+                    raise self._transport_error
+                if self._closed:
+                    raise CodexTransportError("client is closing")
+                await self._notification_ready.wait()
 
-            wait_timeout: float | None = None
-            if deadline is not None:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    raise asyncio.TimeoutError
-                wait_timeout = remaining
+    async def _publish_notification(self, event: dict[str, Any]) -> None:
+        """Buffer one event and wake all consumers to recheck their turn.
 
-            if wait_timeout is None:
-                event = await self._notifications.get()
-            else:
-                event = await asyncio.wait_for(
-                    self._notifications.get(),
-                    timeout=wait_timeout,
-                )
-
-            if _is_transport_error_event(event) or self._event_is_for_turn(event, turn_id):
-                return event
-
+        :param event: Notification or server request received on the transport.
+        :return: None.
+        """
+        async with self._notification_ready:
             self._deferred_notifications.append(event)
+            self._notification_ready.notify_all()
 
     async def _await_turn_event_or_timeout(
         self,
@@ -1804,37 +1883,65 @@ class CodexClient:
             ) from exc
 
     def _find_deferred_for_turn(self, turn_id: str) -> int | None:
+        """Find the earliest notification belonging to a turn.
+
+        :param turn_id: Target turn identifier.
+        :return: Buffer index, or None when no matching notification is buffered.
+        """
         for idx, event in enumerate(self._deferred_notifications):
-            if _is_transport_error_event(event) or self._event_is_for_turn(event, turn_id):
+            if _is_transport_error_event(event) or self._event_is_for_turn(
+                event, turn_id
+            ):
                 return idx
         return None
 
     def _event_is_for_turn(self, event: dict[str, Any], turn_id: str) -> bool:
-        if _event_mentions_turn_id(event, turn_id):
-            return True
+        """Match envelope identifiers without inspecting unrelated item contents.
 
-        method = event.get("method")
-        if not isinstance(method, str):
-            return False
-
-        if not (is_turn_completed(method) or is_turn_failed(method)):
-            return False
-
+        :param event: Notification envelope.
+        :param turn_id: Target turn identifier.
+        :return: Whether the event unambiguously belongs to the requested turn.
+        """
         params = event.get("params")
         if not isinstance(params, Mapping):
-            return True
+            params = {}
+        thread_id = params.get("threadId", params.get("thread_id"))
+        session = self._turn_sessions.get(turn_id)
+        if (
+            thread_id is not None
+            and session is not None
+            and thread_id != session.thread_id
+        ):
+            return False
+        event_turn_id = params.get("turnId", params.get("turn_id"))
+        turn = params.get("turn")
+        if event_turn_id is None and isinstance(turn, Mapping):
+            event_turn_id = turn.get("id")
+        if event_turn_id is not None:
+            return event_turn_id == turn_id
+        method = event.get("method")
+        if not isinstance(method, str) or not (
+            is_turn_completed(method) or is_turn_failed(method)
+        ):
+            return False
+        if thread_id is not None:
+            matching = [
+                s.turn_id
+                for s in self._turn_sessions.values()
+                if s.thread_id == thread_id
+            ]
+            return matching == [turn_id]
+        return list(self._turn_sessions) == [turn_id]
 
-        has_direct_turn = (
-            _find_first_string_by_exact_keys(params, {"turnid", "turn_id"}) is not None
-        )
-        turn_obj = _find_first_dict_by_exact_key(params, {"turn"})
-        has_turn_obj = False
-        if turn_obj is not None:
-            has_turn_obj = _find_first_string_by_exact_keys(turn_obj, {"id"}) is not None
+    def _apply_event_to_session(
+        self, session: _TurnSession, event: dict[str, Any]
+    ) -> None:
+        """Collect completed items and record the actual terminal outcome.
 
-        return not has_direct_turn and not has_turn_obj
-
-    def _apply_event_to_session(self, session: _TurnSession, event: dict[str, Any]) -> None:
+        :param session: Mutable turn state.
+        :param event: Notification already routed to this turn.
+        :return: None.
+        """
         method = event.get("method")
         if not isinstance(method, str):
             return
@@ -1860,7 +1967,9 @@ class CodexClient:
             if step.item_id is None or step.item_id not in session.step_item_ids:
                 if step.item_id is not None:
                     session.step_item_ids.add(step.item_id)
-                session.step_records.append(_StepRecord(event_index=event_index, step=step))
+                session.step_records.append(
+                    _StepRecord(event_index=event_index, step=step)
+                )
 
         if is_turn_failed(method):
             details = _find_first_string_by_exact_keys(event, {"message", "error"})
@@ -1869,14 +1978,32 @@ class CodexClient:
 
         if is_turn_completed(method):
             session.completed = True
+            params = event.get("params", {})
+            turn = params.get("turn", {}) if isinstance(params, dict) else {}
+            if isinstance(turn, dict):
+                session.failed = turn.get("status") == _TURN_FAILED_STATUS
+                session.interrupted = turn.get("status") == _TURN_INTERRUPTED_STATUS
+                if session.failed or session.interrupted:
+                    session.failure_data = turn
+                    session.failure_message = (
+                        _find_first_string_by_exact_keys(turn.get("error"), {"message"})
+                        or f"turn {turn['status']}"
+                    )
 
     def _cleanup_turn_state(self, turn_id: str) -> None:
+        """Release a terminal turn, its pending prompts, and buffered events.
+
+        :param turn_id: Turn whose local state should be released.
+        :return: None.
+        """
         self._turn_sessions.pop(turn_id, None)
         for request_id, request in list(self._pending_approval_requests.items()):
             if request.turn_id == turn_id:
                 self._pending_approval_requests.pop(request_id, None)
-        for request_id, request in list(self._pending_user_input_requests.items()):
-            if request.turn_id == turn_id:
+        for request_id, user_input_request in list(
+            self._pending_user_input_requests.items()
+        ):
+            if user_input_request.turn_id == turn_id:
                 self._pending_user_input_requests.pop(request_id, None)
         self._drop_deferred_for_turn(turn_id)
 
@@ -1938,7 +2065,7 @@ class CodexClient:
                             payload=payload,
                         )
                         if handled:
-                            await self._notifications.put(payload)
+                            await self._publish_notification(payload)
                             continue
                         error_response = make_error_response(
                             request_id,
@@ -1948,24 +2075,42 @@ class CodexClient:
                         async with self._send_lock:
                             await self._transport.send(error_response)
 
-                await self._notifications.put(payload)
+                if method == _SERVER_REQUEST_RESOLVED_METHOD:
+                    self._resolve_server_request(payload)
+                await self._publish_notification(payload)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             if self._closed:
                 return
             transport_error = CodexTransportError(f"receiver loop failed: {exc}")
+            self._transport_error = transport_error
             for future in list(self._pending.values()):
                 if not future.done():
                     future.set_exception(transport_error)
             self._pending.clear()
-            await self._notifications.put(
-                {
-                    "jsonrpc": "2.0",
-                    "method": "__transport_error__",
-                    "params": {"message": str(exc)},
-                }
-            )
+            async with self._notification_ready:
+                self._notification_ready.notify_all()
+
+    def _resolve_server_request(self, payload: dict[str, Any]) -> None:
+        """Discard prompts explicitly resolved by the server on this thread.
+
+        :param payload: A serverRequest/resolved notification.
+        :return: None.
+        """
+        params = payload.get("params")
+        if not isinstance(params, dict):
+            return
+        request_id = params.get("requestId")
+        if not isinstance(request_id, (int, str)):
+            return
+        for pending in (
+            self._pending_approval_requests,
+            self._pending_user_input_requests,
+        ):
+            request = pending.get(request_id)
+            if request is not None and request.thread_id == params.get("threadId"):
+                pending.pop(request_id, None)
 
     async def _handle_server_request(
         self,
@@ -1974,6 +2119,13 @@ class CodexClient:
         method: str,
         payload: dict[str, Any],
     ) -> bool:
+        """Dispatch supported prompts according to the selected response mode.
+
+        :param request_id: Server-assigned RPC identifier.
+        :param method: Server request method.
+        :param payload: Complete request envelope.
+        :return: Whether the request method is supported.
+        """
         if method not in {
             ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL_METHOD,
             ITEM_FILE_CHANGE_REQUEST_APPROVAL_METHOD,
@@ -1994,7 +2146,7 @@ class CodexClient:
 
         if method == ITEM_TOOL_REQUEST_USER_INPUT_METHOD:
             try:
-                request = _parse_user_input_request(
+                user_input_request = _parse_user_input_request(
                     request_id=request_id,
                     method=method,
                     params=params,
@@ -2005,13 +2157,17 @@ class CodexClient:
                     await self._transport.send(error)
                 return True
 
-            self._pending_user_input_requests[request_id] = request
-            await self._user_input_requests.put(request)
+            self._pending_user_input_requests[request_id] = user_input_request
+            await self._user_input_requests.put(user_input_request)
 
             if self._user_input_handler is None:
-                self._spawn_background_task(self._auto_fail_user_input(request))
+                self._spawn_background_task(
+                    self._auto_fail_user_input(user_input_request)
+                )
             else:
-                self._spawn_background_task(self._run_user_input_handler(request))
+                self._spawn_background_task(
+                    self._run_user_input_handler(user_input_request)
+                )
             return True
 
         try:
@@ -2030,7 +2186,8 @@ class CodexClient:
         await self._approval_requests.put(request)
 
         if self._approval_handler is None:
-            self._spawn_background_task(self._auto_decline_approval(request))
+            if self._approval_mode == _APPROVAL_AUTO_MODE:
+                self._spawn_background_task(self._auto_decline_approval(request))
         else:
             self._spawn_background_task(self._run_approval_handler(request))
         return True
@@ -2047,7 +2204,8 @@ class CodexClient:
     async def _run_approval_handler(self, request: ApprovalRequest) -> None:
         handler = self._approval_handler
         if handler is None:
-            await self._auto_decline_approval(request)
+            if self._approval_mode == _APPROVAL_AUTO_MODE:
+                await self._auto_decline_approval(request)
             return
 
         decision: CommandApprovalDecision | FileChangeApprovalDecision
@@ -2177,7 +2335,9 @@ def _turn_overrides_to_params(overrides: TurnOverrides | None) -> dict[str, Any]
     return params
 
 
-def _merge_thread_config(base: ThreadConfig, override: ThreadConfig | None) -> ThreadConfig:
+def _merge_thread_config(
+    base: ThreadConfig, override: ThreadConfig | None
+) -> ThreadConfig:
     """Merge two thread configs where override values replace non-UNSET base values."""
     if override is None:
         return ThreadConfig(
@@ -2284,7 +2444,9 @@ def _prepare_initialize_params(
 
     capabilities_dict = dict(capabilities)
     if "optOutNotificationMethods" not in capabilities_dict:
-        capabilities_dict["optOutNotificationMethods"] = list(DEFAULT_OPT_OUT_NOTIFICATION_METHODS)
+        capabilities_dict["optOutNotificationMethods"] = list(
+            DEFAULT_OPT_OUT_NOTIFICATION_METHODS
+        )
     payload["capabilities"] = capabilities_dict
     return payload
 
@@ -2510,7 +2672,9 @@ def _parse_user_input_request(
     if not isinstance(questions_value, list):
         raise CodexProtocolError(f"{method} missing required array field: questions")
 
-    questions = [_parse_user_input_question(entry, method=method) for entry in questions_value]
+    questions = [
+        _parse_user_input_question(entry, method=method) for entry in questions_value
+    ]
 
     return UserInputRequest(
         request_id=request_id,
@@ -2566,7 +2730,9 @@ def _parse_approval_request(
         command_actions: list[dict[str, Any]] | None = None
         if isinstance(command_actions_value, list):
             command_actions = [
-                dict(action) for action in command_actions_value if isinstance(action, Mapping)
+                dict(action)
+                for action in command_actions_value
+                if isinstance(action, Mapping)
             ]
 
         amendment_value = params.get("proposedExecpolicyAmendment")
@@ -2618,7 +2784,9 @@ def _encode_approval_result(
         return {"decision": encoded_decision}
 
     if isinstance(decision, CommandApprovalWithExecpolicyAmendment):
-        raise ValueError("execpolicy amendment decision is invalid for file-change approvals")
+        raise ValueError(
+            "execpolicy amendment decision is invalid for file-change approvals"
+        )
 
     return {"decision": _encode_simple_approval_decision(decision)}
 
@@ -2647,24 +2815,6 @@ def _require_string_field(params: Mapping[str, Any], key: str, method: str) -> s
 
 def _optional_string(value: Any) -> str | None:
     return value if isinstance(value, str) else None
-
-
-def _event_mentions_turn_id(payload: Any, turn_id: str) -> bool:
-    """Return True when payload references target turn id."""
-    if not isinstance(payload, (dict, list)):
-        return False
-
-    direct = _find_first_string_by_exact_keys(payload, {"turnid", "turn_id"})
-    if direct == turn_id:
-        return True
-
-    turn_obj = _find_first_dict_by_exact_key(payload, {"turn"})
-    if turn_obj:
-        nested_id = _find_first_string_by_exact_keys(turn_obj, {"id"})
-        if nested_id == turn_id:
-            return True
-
-    return False
 
 
 def _find_first_string_by_exact_keys(

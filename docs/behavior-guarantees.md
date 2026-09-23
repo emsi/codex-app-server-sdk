@@ -35,11 +35,21 @@ This page records intended high-level behavior for consumers.
 
 ## Cancel model
 
-- [`cancel(...)`](api/client.md#codex_app_server_sdk.client.CodexClient.cancel) sends best-effort interrupt.
+- [`cancel(...)`](api/client.md#codex_app_server_sdk.client.CodexClient.cancel) sends both thread and turn identifiers and waits for terminal confirmation.
 - unread steps/events since continuation cursor are returned.
-- internal state is cleaned so thread reuse is safe.
+- internal state is cleaned only after terminal confirmation; interruption errors
+  propagate and confirmation timeouts retain the continuation and unread cursor.
+
+## Concurrent and unsuccessful turns
+
+- Turn consumers wake independently and consume only events for their own turn.
+- Events received before the turn-start response are retained.
+- Failed and interrupted terminal statuses raise `CodexProtocolError` from both
+  chat APIs; partial assistant messages do not turn a failed turn into success.
+- Initialization runs once per connection, including concurrent first calls.
 
 ## Transport behavior
 
 - context-manager lifecycle (`async with`) is preferred.
 - pending requests fail with transport error when client closes.
+- All waiting turn consumers wake on connection failure or client close.

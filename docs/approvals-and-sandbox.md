@@ -102,13 +102,17 @@ async with CodexClient.connect_stdio() as client:
 
 ### Stream mode (manual response)
 
+Set `approval_mode="manual"` before starting the turn. Without a callback,
+requests then remain pending until you answer them or the server resolves them.
+The default `approval_mode="auto"` still declines requests without a callback.
+
 ```python
 import asyncio
 from contextlib import suppress
 from codex_app_server_sdk import CodexClient, CommandApprovalRequest
 
 
-async with CodexClient.connect_stdio() as client:
+async with CodexClient.connect_stdio(approval_mode="manual") as client:
     async def approval_loop():
         async for req in client.approval_requests():
             if isinstance(req, CommandApprovalRequest):
@@ -126,7 +130,10 @@ async with CodexClient.connect_stdio() as client:
             await approval_task
 ```
 
-`approval_requests()` is observational. If a callback is configured, callback handling remains authoritative.
+If a callback is configured, it handles requests in either mode and
+`approval_requests()` is observational. Choose one response mechanism per
+request. Long human waits still follow the client's inactivity timeout;
+disable that timeout or retain and resume the continuation when needed.
 
 For plan-mode user questions (`item/tool/requestUserInput`), see
 [Human-in-the-loop](human-in-the-loop.md).

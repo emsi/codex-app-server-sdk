@@ -55,4 +55,16 @@ cancelled = await client.cancel(exc.continuation)
 print(cancelled.was_interrupted, len(cancelled.steps), len(cancelled.raw_events))
 ```
 
-[`cancel(...)`](api/client.md#codex_app_server_sdk.client.CodexClient.cancel) cleans internal turn state so the thread can be reused safely.
+[`cancel(...)`](api/client.md#codex_app_server_sdk.client.CodexClient.cancel)
+cleans internal turn state only after observing a terminal event. An RPC error
+propagates and leaves the continuation usable. If the interrupt is acknowledged
+but completion does not arrive within `timeout`, `CodexTurnInactiveError`
+contains the original continuation, including its unread cursor. Resume that
+continuation or retry cancellation; do not assume the server stopped working.
+
+`was_interrupted` means the server confirmed interruption. `was_completed`
+means successful completion was observed instead. These flags describe observed
+outcomes, rather than merely recording that an interrupt request was sent.
+
+For low-level turns, call `interrupt_turn(turn_id, thread_id=thread_id)`.
+The SDK infers `thread_id` when it still owns the turn session.

@@ -398,13 +398,13 @@ uv run python examples/chat_session_websocket.py
 - `compact_thread(thread_id)`: request context compaction.
 - `chat(...)` (`text=None, thread_id=None, user=None, metadata=None, thread_config=None, turn_overrides=None, inactivity_timeout=None, continuation=None`): async iterator yielding completed non-delta step blocks.
 - `chat_once(...)` (`text=None, thread_id=None, user=None, metadata=None, thread_config=None, turn_overrides=None, inactivity_timeout=None, continuation=None`): send one user message and wait for completed turn.
-- `cancel(continuation, timeout=None)`: interrupt running turn, return unread steps/events, and clean turn state.
+- `cancel(continuation, timeout=None)`: interrupt a turn and return unread steps/events after terminal confirmation; retain the continuation if cancellation fails or times out.
 - `steer_turn(thread_id=..., expected_turn_id=..., input_items=...)`: steer active turn input.
 - `start_review(thread_id=..., target=..., delivery=None)`: run review mode.
 - `list_models(...)`: discover available models.
 - `exec_command(command, ...)`: run one command via server command API.
 - `read_config(...)`, `read_config_requirements()`, `write_config_value(...)`, `batch_write_config(...)`: config APIs.
-- `interrupt_turn(turn_id, timeout=None)`: low-level turn interruption request.
+- `interrupt_turn(turn_id, thread_id=None, timeout=None)`: low-level interruption request; infer the thread for tracked turns or pass it explicitly.
 - `close()`: cancel receive loop and close transport.
 
 ### `Transport` and implementations (`src/codex_app_server_sdk/transport.py`)
@@ -453,7 +453,9 @@ uv run python examples/chat_session_websocket.py
 - `chat_once(...)` resolves final text from completed `agentMessage` items (`item/completed`), with `thread/read(includeTurns=true)` fallback.
 - `turn_timeout` is intentionally removed to avoid conflicting timeout semantics.
 - Turn waits are controlled by `inactivity_timeout` (or unbounded when `None`).
-- `cancel(...)` interrupts a continuation turn, returns unread buffered data, and cleans internal session state so the same thread can be reused safely.
+- `cancel(...)` releases turn state only after a terminal event. RPC failures propagate; a confirmation timeout raises `CodexTurnInactiveError` with the original continuation.
+- Failed or interrupted turns raise `CodexProtocolError` from both chat APIs, even if partial assistant text was received.
+- Use `approval_mode="manual"` on either connection factory to answer `approval_requests()` yourself. Without a callback, the default `"auto"` mode declines requests.
 - Advanced thread-level config/fork uses protocol v2 methods (`thread/start`, `thread/resume`, `thread/fork`) exposed via `ThreadHandle` and `ThreadConfig`.
 - `metadata` is applied on `turn/start` payloads for message turns; thread-level config uses schema-aligned fields on thread methods.
 - preferred lifecycle is `async with CodexClient.connect_*() as client:`; manual `start()/close()` remains available for advanced control.

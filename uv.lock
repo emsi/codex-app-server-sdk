@@ -225,7 +225,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.8.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2.0" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=7.0.0" },
-    { name = "websockets", specifier = ">=16,<17" },
+    { name = "websockets", specifier = ">=16,<18" },
     { name = "zensical", marker = "extra == 'dev'", specifier = ">=0.0.23" },
 ]
 provides-extras = ["dev"]

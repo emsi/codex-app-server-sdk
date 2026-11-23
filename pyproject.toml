@@ -28,7 +28,7 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.8.0",
-    "websockets>=16,<17",
+    "websockets>=16,<18",
 ]
 
 [project.urls]
